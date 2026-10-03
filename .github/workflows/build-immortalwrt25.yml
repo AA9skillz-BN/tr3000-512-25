@@ -202,7 +202,7 @@ jobs:
         tag_name: ${{ steps.tag.outputs.release_tag }}
         body_path: release.txt
         files: |
-          ${{ env.FIRMWARE }}/*cudy_tr3000*
+          ${{ env.FIRMWARE }}/*.bin
           ${{ env.FIRMWARE }}/*.buildinfo
           ${{ env.FIRMWARE }}/*.manifest
           ${{ env.FIRMWARE }}/*sha256sums
