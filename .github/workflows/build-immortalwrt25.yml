@@ -4,6 +4,9 @@ on:
   repository_dispatch:
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 env:
   REPO_URL: https://github.com/immortalwrt/immortalwrt
   REPO_BRANCH: master
@@ -24,7 +27,7 @@ jobs:
     - name: Checkout
       uses: actions/checkout@v4
 
-    # 1. 深度清理磁盘，释放 30GB+ NVMe 固态硬盘空间
+    # 1. 释放宿主机磁盘空间（获得 30GB+ NVMe 固态硬盘空间）
     - name: Free up disk space
       uses: jlumbroso/free-disk-space@main
       with:
@@ -36,7 +39,7 @@ jobs:
         docker-images: true
         swap-storage: false
 
-    # 2. 初始化环境，配置 10G Swap 防止编译峰值 OOM，移除 tmpfs 避免爆盘
+    # 2. 初始化环境，配置 10G Swap 防止峰值 OOM，移除 tmpfs 避免容量锁死
     - name: Initialization environment
       env:
         DEBIAN_FRONTEND: noninteractive
@@ -45,67 +48,35 @@ jobs:
         sudo -E apt-get -qq install -y ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential \
         bzip2 ccache cmake cpio curl device-tree-compiler fastjar flex gawk gettext gcc-multilib g++-multilib \
         git gperf haveged help2man intltool libc6-dev-i386 libelf-dev libfuse-dev libglib2.0-dev libgmp3-dev \
-        libltdl-dev libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev libpython3-dev libreadline-dev \
-        libssl-dev libtool lrzsz mkisofs msmtp nano ninja-build psmisc python3 python3-pyelftools python3-setuptools \
-        qemu-utils rsync scons squashfs-tools subversion swig texinfo uglifyjs upx-ucl unzip vim wget xmlto \
-        zlib1g-dev clang llvm lld
-        sudo timedatectl set-timezone "$TZ"
+        libltdl-已按你的全部要求将整套编译方案彻底梳理完毕，排除了所有已知暗坑（无 `tmpfs` 爆盘、无管道误杀、防截断诊断、全套中兴 F50 驱动环境）。
 
-        sudo fallocate -l 10G /swapfile_ram
-        sudo chmod 600 /swapfile_ram
-        sudo mkswap /swapfile_ram
-        sudo swapon /swapfile_ram
+以下为你需要修改和确认的**两个核心文件**：
 
-        # 直接创建在宿主机根目录，使用全量 NVMe 磁盘
-        sudo mkdir -p /workdir $CCACHE_DIR
-        sudo chown -R $USER:$GROUPS /workdir $CCACHE_DIR
+---
 
-    # 3. 浅克隆源码
-    - name: Clone source code
-      working-directory: /workdir
-      run: |
-        git clone --depth 1 $REPO_URL -b $REPO_BRANCH openwrt
-        ln -sf /workdir/openwrt $GITHUB_WORKSPACE/openwrt
+### 文件一：`Actions-OpenWrt/diy-part2.sh`
+（在文件最底部追加以下内容，用于解决 `libubox` 补丁冲突并自动注入中兴 F50 的全套免驱网卡驱动）
 
-    # 4. 加载 feeds 并更新安装
-    - name: Load custom feeds
-      run: |
-        chmod +x $DIY_P1_SH
-        cd openwrt
-        $GITHUB_WORKSPACE/$DIY_P1_SH
+```bash
+# 1. 清理 libubox 快照补丁冲突
+rm -rf package/libs/libubox/patches
 
-    - name: Update feeds
-      run: cd openwrt && ./scripts/feeds update -a
-
-    - name: Install feeds
-      run: cd openwrt && ./scripts/feeds install -a
-
-    # 5. 加载配置并注入编译优化参数
-    - name: Load custom configuration
-      run: |
-        [ -e files ] && mv files openwrt/files
-        [ -e $CONFIG_FILE ] && cp $CONFIG_FILE openwrt/.config
-        chmod +x $DIY_P2_SH
-        cd openwrt
-        $GITHUB_WORKSPACE/$DIY_P2_SH
-
-        # 速度优化：关闭冗余调试信息生成，大幅减少磁盘 I/O 写入
-        sed -i 's/CONFIG_COLLECT_KERNEL_DEBUG=y/CONFIG_COLLECT_KERNEL_DEBUG=n/' .config || true
-        echo "CONFIG_NO_STRIP=n" >> .config
+# 2. 注入中兴 F50 5G 随身 WiFi 的全套驱动与依赖环境
+cat >> .config <<EOF " "$TZ" "CONFIG_NO_STRIP="n" # ### $CCACHE_DIR $CONFIG_FILE$DIY_P1_SH $DIY_P2_SH$GITHUB_WORKSPACE/$DIY_P1_SH$GITHUB_WORKSPACE/$DIY_P2_SH$GITHUB_WORKSPACE/openwrt $REPO_BRANCH$REPO_URL $USER:$GROUPS && 's/CONFIG_COLLECT_KERNEL_DEBUG="y/CONFIG_COLLECT_KERNEL_DEBUG=n/'" +x - --- --depth -E -R -a -b -e -i -l -p -qq -sf -y ./scripts/feeds .config / /home/runner/.ccache /swapfile_ram /workdir /workdir/openwrt 1 1. 10G 2. 25.x 3. 30GB+ 4. 5. 512MB 5G 600 AT Actions-OpenWrt/diy-part1.sh Actions-OpenWrt/diy-part2.sh Asia/Shanghai Build CCACHE_DIR: CCACHE_MAXSIZE: CDC-Ether CDC-NCM CONFIG_FILE: CONFIG_PACKAGE_kmod-nls-base="y" CONFIG_PACKAGE_kmod-nls-utf8="y" CONFIG_PACKAGE_kmod-usb-core="y" CONFIG_PACKAGE_kmod-usb-net="y" CONFIG_PACKAGE_kmod-usb-net-cdc-ether="y" CONFIG_PACKAGE_kmod-usb-net-cdc-ncm="y" CONFIG_PACKAGE_kmod-usb-net-rndis="y" CONFIG_PACKAGE_kmod-usb-serial="y" CONFIG_PACKAGE_kmod-usb-serial-option="y" CONFIG_PACKAGE_kmod-usb-serial-wwan="y" CONFIG_PACKAGE_kmod-usb3="y" CONFIG_PACKAGE_usb-modeswitch="y" CONFIG_PACKAGE_usbutils="y" Checkout Clone Cudy DEBIAN_FRONTEND: DIY_P1_SH: DIY_P2_SH: EOF F50 Free GB I/O ImmortalWrt Initialization Install Load NVMe OOM REPO_BRANCH: REPO_URL: Swap TR3000 TZ: UPLOAD_FIRMWARE: UPLOAD_RELEASE: USB Update [ \ ] ``` ```yaml ack actions/checkout@v4 android: antlr3 apt-get asciidoc autoconf automake autopoint binutils bison build-essential build: bzip2 ccache cd chmod chown clang clone cmake code configuration contents: cp cpio curl custom device-tree-compiler disk docker-images: dotnet: echo env: environment fallocate false fastjar feeds files flex for g++-multilib gawk gcc-multilib gettext git gperf haskell: haveged help2man [https://github.com/immortalwrt/immortalwrt](https://github.com/immortalwrt/immortalwrt) install intltool jlumbroso/free-disk-space@main jobs: large-packages: libc6-dev-i386 libelf-dev libfuse-dev libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev libpython3-dev libreadline-dev libssl-dev libtool lld llvm ln lrzsz master mkdir mkisofs mkswap msmtp mv name: nano ninja-build noninteractive on: openwrt openwrt-mod/config/minimum.config openwrt/.config openwrt/files permissions: psmisc python3 python3-pyelftools python3-setuptools qemu-utils repository_dispatch: rsync run: runs-on: scons sed set-timezone source space squashfs-tools steps: subversion sudo swap-storage: swapon swig texinfo timedatectl tmpfs tool-cache: true ubuntu-22.04 uglifyjs unzip up update upx-ucl uses: vim wget with: workflow workflow_dispatch: working-directory: write xmlto zlib1g-dev | || 串口与模式切换支持（防止被识别为虚拟光驱/U盘，支持 全覆盖） 关闭调试符号采集，节省数 写入开销 写入权限与磁盘容量问题） 加载基础配置与优化指令 加载自定义源并更新 固态硬盘空间） 安装编译依赖，移除 挂载，配置 文件二：`.github/workflows/build-immortalwrt25.yml` 文件，已彻底解决日志截断、Release 核心与控制器驱动 浅克隆源码 深度释放磁盘（保留 的 虚拟以太网驱动协议（RNDIS 调试） 防 （全选复制覆盖原有>> .config
         echo "CONFIG_USE_STRIP=y" >> .config
 
         make defconfig
 
-    # 6. 配置 ccache 二进制构建缓存
+    # 6. 配置 ccache 编译缓存
     - name: Cache ccache
       uses: actions/cache@v4
       with:
         path: ${{ env.CCACHE_DIR }}
-        key: ${{ runner.os }}-openwrt-ccache-v4-${{ hashFiles('openwrt/.config') }}
+        key: ${{ runner.os }}-openwrt-ccache-v5-${{ hashFiles('openwrt/.config') }}
         restore-keys: |
-          ${{ runner.os }}-openwrt-ccache-v4-
+          ${{ runner.os }}-openwrt-ccache-v5-
 
-    # 7. 16 线程高速下载依赖包并校验
+    # 7. 并发高速下载依赖包
     - name: Download package
       id: package
       run: |
@@ -121,7 +92,7 @@ jobs:
           fi
         done
 
-    # 8. 编译固件（双保险防截断 + 自动提取报错）
+    # 8. 编译固件（安全状态判定 + 核心报错过滤 + 防界面截断）
     - name: Compile the firmware
       id: compile
       run: |
@@ -132,27 +103,28 @@ jobs:
         NPROC=$(nproc)
         echo "Using $((NPROC + 1)) parallel threads..."
 
-        # 输出并保存日志到单个文件
-        set -o pipefail
-        make -j$((NPROC + 1)) 2>&1 | tee /tmp/build.log || {
+        make -j$((NPROC + 1)) 2>&1 | tee /tmp/build.log
+        RET=${PIPESTATUS[0]}
+
+        if [ $RET -ne 0 ]; then
             echo "=========================================="
             echo "           COMPILATION FAILED             "
             echo "=========================================="
-            echo ">>> 提取核心错误定位："
+            echo ">>> 提取关键错误行："
             grep -E "ERROR:|failed to build|Error [1-9]|fatal error:" /tmp/build.log | tail -n 30 || true
             echo "=========================================="
-            echo ">>> 报错上下文最后 50 行："
+            echo ">>> 报错附近最后 50 行日志："
             tail -n 50 /tmp/build.log
-            exit 1
-        }
+            exit $RET
+        fi
 
         echo "=== Ccache Hit Rate Statistics ==="
         ccache -s
 
         echo "status=success" >> $GITHUB_OUTPUT
-        echo "FILE_DATE=_$(date +"%Y%m%d%H%M")" >> $GITHUB_ENV
+        echo "FILE_DATE=_$(date +"\%Y\%m\%d\%H\%M")" >> $GITHUB_ENV
 
-    # 8.1 如果编译失败，自动将错误日志打包为 Artifact 上传，不用再去到处找下载按钮
+    # 8.1 失败自动打包日志（在 Summary 界面可直接下载，不用到处翻）
     - name: Upload error log on failure
       uses: actions/upload-artifact@v4
       if: failure()
@@ -160,7 +132,7 @@ jobs:
         name: compilation-failure-log
         path: /tmp/build.log
 
-    # 9. 整理固件产物
+    # 9. 整理输出文件
     - name: Organize files
       id: organize
       if: env.UPLOAD_FIRMWARE == 'true' && steps.compile.outputs.status == 'success' && !cancelled()
@@ -170,7 +142,7 @@ jobs:
         echo "FIRMWARE=$PWD" >> $GITHUB_ENV
         echo "status=success" >> $GITHUB_OUTPUT
 
-    # 10. 上传固件 Artifacts
+    # 10. 上传构件 Artifacts
     - name: Upload firmware directory
       uses: actions/upload-artifact@v4
       if: steps.organize.outputs.status == 'success' && !cancelled()
@@ -178,14 +150,14 @@ jobs:
         name: OpenWrt_firmware_Cudy_TR3000_512MB${{ env.FILE_DATE }}
         path: ${{ env.FIRMWARE }}
 
-    # 11. 发布固件到 Release
+    # 11. 自动发布至 Release
     - name: Generate release tag
       id: tag
       if: env.UPLOAD_RELEASE == 'true' && steps.compile.outputs.status == 'success' && !cancelled()
       run: |
-        echo "release_tag=$(date +"%Y.%m.%d-%H%M")" >> $GITHUB_OUTPUT
+        echo "release_tag=$(date +"\%Y.\%m.\%d-\%H\%M")" >> $GITHUB_OUTPUT
         touch release.txt
-        echo "ImmortalWrt 25.x for Cudy TR3000 512MB" >> release.txt
+        echo "ImmortalWrt 25.x for Cudy TR3000 512MB with ZTE F50 Driver" >> release.txt
         echo "status=success" >> $GITHUB_OUTPUT
 
     - name: Upload firmware to release
