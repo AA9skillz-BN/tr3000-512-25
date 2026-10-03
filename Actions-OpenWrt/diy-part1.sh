@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# 1. 添加 iStore 官方商店源（适配 apk 架构）
+# 1. 添加 iStore 官方商店源（适配 25.x apk 架构）
 if ! grep -q "linkease/istore" feeds.conf.default; then
     echo 'src-git istore https://github.com/linkease/istore.git;main' >> feeds.conf.default
 fi
