@@ -12,3 +12,5 @@ fi
 sed -i '/llvm-bpf/d' tools/Makefile
 sed -i 's/CONFIG_TOOLS_LLVM_BPF=y/# CONFIG_TOOLS_LLVM_BPF is not set/g' .config 2>/dev/null || true
 sed -i 's/CONFIG_KERNEL_BPF_TOOLCHAIN=y/# CONFIG_KERNEL_BPF_TOOLCHAIN is not set/g' .config 2>/dev/null || true
+# 修复 libubox 快照补丁冲突问题
+rm -rf package/libs/libubox/patches
