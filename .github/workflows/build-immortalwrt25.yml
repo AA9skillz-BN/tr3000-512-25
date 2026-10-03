@@ -133,32 +133,31 @@ jobs:
         # 3. 针对被清理的残缺包补救重新下载
         make download -j8
 
-    # 9. 编译固件（前置修复 libubox 并满载构建）
+    # 9. 编译固件（多线程满载，按规范依赖树构建）
     - name: Compile the firmware
       id: compile
       run: |
         cd openwrt
         ccache -M $CCACHE_MAXSIZE
         ccache -z
-        
-        # 1. 彻底清除 libubox 残留，杜绝脏补丁/坏解压
+
+        # 确保 host 工具链目录存在，避免 host/bin/sed 缺失
+        mkdir -p staging_dir/host/bin
+        ln -sf $(which sed) staging_dir/host/bin/sed
+
+        # 清除上次可能解压失败的 lua 和 libubox 残留
         rm -rf build_dir/target-aarch64_cortex-a53_musl/libubox*
-        rm -f dl/libubox*
-        
-        # 2. 单独重下并预编译 libubox，输出完整详细日志
-        echo "=== Pre-compiling package/libs/libubox ==="
-        make package/libs/libubox/download V=s
-        make package/libs/libubox/compile -j1 V=s
-        
+        rm -rf build_dir/hostpkg/lua*
+
         NPROC=$(nproc)
-        echo "Using $((NPROC + 1)) parallel threads for full build..."
-        
-        # 3. 满载构建整体固件
+        echo "Using $((NPROC + 1)) parallel threads for compilation..."
+
+        # 满载并发构建，若遇失败打印详细上下文定位
         make -j$((NPROC + 1)) || make -j1 V=s
-        
+
         echo "=== Ccache Hit Rate Statistics ==="
         ccache -s
-        
+
         echo "status=success" >> $GITHUB_OUTPUT
         echo "FILE_DATE=_$(date +"%Y%m%d%H%M")" >> $GITHUB_ENV
 
