@@ -133,7 +133,7 @@ jobs:
         # 3. 针对被清理的残缺包补救重新下载
         make download -j8
 
-    # 9. 【极速编译 Compile The Firmware】内存盘 + ccache + 多线程满载
+    # 9. 编译固件（前置修复 libubox 并满载构建）
     - name: Compile the firmware
       id: compile
       run: |
@@ -141,10 +141,19 @@ jobs:
         ccache -M $CCACHE_MAXSIZE
         ccache -z
         
-        NPROC=$(nproc)
-        echo "Using $((NPROC + 1)) parallel threads on tmpfs memory disk..."
+        # 1. 彻底清除 libubox 残留，杜绝脏补丁/坏解压
+        rm -rf build_dir/target-aarch64_cortex-a53_musl/libubox*
+        rm -f dl/libubox*
         
-        # 优先满载并发，失败时精确定位错误
+        # 2. 单独重下并预编译 libubox，输出完整详细日志
+        echo "=== Pre-compiling package/libs/libubox ==="
+        make package/libs/libubox/download V=s
+        make package/libs/libubox/compile -j1 V=s
+        
+        NPROC=$(nproc)
+        echo "Using $((NPROC + 1)) parallel threads for full build..."
+        
+        # 3. 满载构建整体固件
         make -j$((NPROC + 1)) || make -j1 V=s
         
         echo "=== Ccache Hit Rate Statistics ==="
