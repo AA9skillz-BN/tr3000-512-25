@@ -13,7 +13,8 @@ env:
   UPLOAD_FIRMWARE: true
   UPLOAD_RELEASE: true
   TZ: Asia/Shanghai
-  CCACHE_DIR: /workdir/.ccache
+  # ccache 放在物理磁盘缓存，不抢占内存
+  CCACHE_DIR: /home/runner/.ccache
   CCACHE_MAXSIZE: 5G
 
 jobs:
@@ -24,7 +25,7 @@ jobs:
     - name: Checkout
       uses: actions/checkout@v4
 
-    # 1. 深度清理磁盘空间以提升 IO 性能
+    # 1. 深度清理磁盘并腾出最大可用空间
     - name: Free up disk space
       uses: jlumbroso/free-disk-space@main
       with:
@@ -36,8 +37,8 @@ jobs:
         docker-images: true
         swap-storage: false
 
-    # 2. 安装编译环境依赖（内置预装 clang/llvm）
-    - name: Initialization environment
+    # 2. 准备系统依赖，配置 Swap 兜底并挂载 tmpfs 内存盘（移植 237 极速编译核心）
+    - name: Initialization environment & Mount tmpfs
       env:
         DEBIAN_FRONTEND: noninteractive
       run: |
@@ -50,10 +51,19 @@ jobs:
         qemu-utils rsync scons squashfs-tools subversion swig texinfo uglifyjs upx-ucl unzip vim wget xmlto \
         zlib1g-dev clang llvm lld
         sudo timedatectl set-timezone "$TZ"
-        sudo mkdir -p /workdir $CCACHE_DIR
-        sudo chown -R $USER:$GROUPS /workdir
 
-    # 3. 浅克隆源码
+        # 创建 10GB 专用高速 Swap 缓冲，防止内存盘爆满崩溃
+        sudo fallocate -l 10G /swapfile_ram
+        sudo chmod 600 /swapfile_ram
+        sudo mkswap /swapfile_ram
+        sudo swapon /swapfile_ram
+
+        # 挂载 12G tmpfs 内存盘作为工作空间（物理内存 + Swap 自动平衡，压榨极限 IO）
+        sudo mkdir -p /workdir $CCACHE_DIR
+        sudo mount -t tmpfs -o size=12G tmpfs /workdir
+        sudo chown -R $USER:$GROUPS /workdir $CCACHE_DIR
+
+    # 3. 浅克隆主干源码到内存盘
     - name: Clone source code
       working-directory: /workdir
       run: |
@@ -73,7 +83,7 @@ jobs:
     - name: Install feeds
       run: cd openwrt && ./scripts/feeds install -a
 
-    # 5. 加载配置并注入 512MB 补丁与去 llvm-bpf 逻辑
+    # 5. 加载配置并注入 512MB 补丁与物理级剔除 llvm-bpf
     - name: Load custom configuration
       run: |
         [ -e files ] && mv files openwrt/files
@@ -83,7 +93,7 @@ jobs:
         $GITHUB_WORKSPACE/$DIY_P2_SH
         make defconfig
 
-    # 6. 缓存 dl 源码依赖包
+    # 6. 安全缓存 dl 源码包
     - name: Cache OpenWrt dl directory
       uses: actions/cache@v4
       with:
@@ -92,7 +102,7 @@ jobs:
         restore-keys: |
           ${{ runner.os }}-openwrt-dl-
 
-    # 7. 缓存 ccache 编译器中间文件
+    # 7. 缓存 ccache 编译器中间件
     - name: Cache ccache
       uses: actions/cache@v4
       with:
@@ -110,7 +120,7 @@ jobs:
         find dl -size -1024c -exec ls -l {} \;
         find dl -size -1024c -exec rm -f {} \;
 
-    # 9. 编译固件（多线程并发 + 错误时快速定位）
+    # 9. 【极速编译 Compile The Firmware】内存盘 + ccache + 多线程满载
     - name: Compile the firmware
       id: compile
       run: |
@@ -119,12 +129,10 @@ jobs:
         ccache -z
         
         NPROC=$(nproc)
-        echo "Using $((NPROC + 1)) parallel threads for compilation..."
+        echo "Using $((NPROC + 1)) parallel threads on tmpfs memory disk..."
         
-        make -j$((NPROC + 1)) || {
-            echo "::warning::Parallel build encountered error, running single thread for diagnostics..."
-            make -j1 V=s
-        }
+        # 满载并发；遇到中断只定位具体目标，杜绝无效重跑
+        make -j$((NPROC + 1)) || make -j1 V=s
         
         echo "=== Ccache Hit Rate Statistics ==="
         ccache -s
@@ -157,7 +165,7 @@ jobs:
       run: |
         echo "release_tag=$(date +"%Y.%m.%d-%H%M")" >> $GITHUB_OUTPUT
         touch release.txt
-        echo "ImmortalWrt 25.x for Cudy TR3000 512MB with iStore & Turbo ACC" >> release.txt
+        echo "ImmortalWrt 25.x for Cudy TR3000 512MB with iStore & Turbo ACC (Optimized Build)" >> release.txt
         echo "status=success" >> $GITHUB_OUTPUT
 
     - name: Upload firmware to release
