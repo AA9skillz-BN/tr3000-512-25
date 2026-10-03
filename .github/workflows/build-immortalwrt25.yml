@@ -6,8 +6,7 @@ on:
 
 env:
   REPO_URL: https://github.com/immortalwrt/immortalwrt
-  REPO_BRANCH: openwrt-25.12
-  FEEDS_CONF: feeds.conf.default
+  REPO_BRANCH: master
   CONFIG_FILE: openwrt-mod/config/minimum.config
   DIY_P1_SH: Actions-OpenWrt/diy-part1.sh
   DIY_P2_SH: Actions-OpenWrt/diy-part2.sh
@@ -50,7 +49,7 @@ jobs:
 
     - name: Load custom feeds
       run: |
-        [ -e $FEEDS_CONF ] && cp $FEEDS_CONF openwrt/feeds.conf.default
+        [ -e feeds.conf.default ] && [ -s feeds.conf.default ] && cp feeds.conf.default openwrt/feeds.conf.default
         chmod +x $DIY_P1_SH
         cd openwrt
         $GITHUB_WORKSPACE/$DIY_P1_SH
@@ -88,7 +87,7 @@ jobs:
 
     - name: Organize files
       id: organize
-      if: env.UPLOAD_FIRMWARE == 'true' && !cancelled()
+      if: env.UPLOAD_FIRMWARE == 'true' && steps.compile.outputs.status == 'success' && !cancelled()
       run: |
         cd openwrt/bin/targets/*/*
         rm -rf packages
