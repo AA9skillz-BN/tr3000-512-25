@@ -13,6 +13,8 @@ env:
   UPLOAD_FIRMWARE: true
   UPLOAD_RELEASE: true
   TZ: Asia/Shanghai
+  CCACHE_DIR: /workdir/.ccache
+  CCACHE_MAXSIZE: 5G
 
 jobs:
   build:
@@ -22,6 +24,19 @@ jobs:
     - name: Checkout
       uses: actions/checkout@v4
 
+    # 1. 深度清理磁盘空间以最大化 IO 吞吐
+    - name: Free up disk space
+      uses: jlumbroso/free-disk-space@main
+      with:
+        tool-cache: false
+        android: true
+        dotnet: true
+        haskell: true
+        large-packages: true
+        docker-images: true
+        swap-storage: false
+
+    # 2. 安装编译环境依赖（内置预编译 clang/llvm 避免源码耗时编译 llvm-bpf）
     - name: Initialization environment
       env:
         DEBIAN_FRONTEND: noninteractive
@@ -33,23 +48,21 @@ jobs:
         libltdl-dev libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev libpython3-dev libreadline-dev \
         libssl-dev libtool lrzsz mkisofs msmtp nano ninja-build psmisc python3 python3-pyelftools python3-setuptools \
         qemu-utils rsync scons squashfs-tools subversion swig texinfo uglifyjs upx-ucl unzip vim wget xmlto \
-        zlib1g-dev
-        sudo -E apt-get -qq autoremove --purge
-        sudo -E apt-get -qq clean
+        zlib1g-dev clang llvm lld
         sudo timedatectl set-timezone "$TZ"
-        sudo mkdir -p /workdir
-        sudo chown $USER:$GROUPS /workdir
+        sudo mkdir -p /workdir $CCACHE_DIR
+        sudo chown -R $USER:$GROUPS /workdir
 
+    # 3. 浅克隆主干源码
     - name: Clone source code
       working-directory: /workdir
       run: |
-        df -hT $PWD
-        git clone --depth 1 $REPO_URL -b $REPO_BRANCH openwrt || git clone --depth 1 $REPO_URL -b master openwrt
+        git clone --depth 1 $REPO_URL -b $REPO_BRANCH openwrt
         ln -sf /workdir/openwrt $GITHUB_WORKSPACE/openwrt
 
+    # 4. 加载自定义 feeds 与插件
     - name: Load custom feeds
       run: |
-        [ -e feeds.conf.default ] && [ -s feeds.conf.default ] && cp feeds.conf.default openwrt/feeds.conf.default
         chmod +x $DIY_P1_SH
         cd openwrt
         $GITHUB_WORKSPACE/$DIY_P1_SH
@@ -60,31 +73,66 @@ jobs:
     - name: Install feeds
       run: cd openwrt && ./scripts/feeds install -a
 
+    # 5. 加载配置并注入 512MB 补丁
     - name: Load custom configuration
       run: |
+        [ -e files ] && mv files openwrt/files
         [ -e $CONFIG_FILE ] && cp $CONFIG_FILE openwrt/.config
         chmod +x $DIY_P2_SH
         cd openwrt
         $GITHUB_WORKSPACE/$DIY_P2_SH
+        make defconfig
 
+    # 6. 安全缓存 dl 依赖包
+    - name: Cache OpenWrt dl directory
+      uses: actions/cache@v4
+      with:
+        path: openwrt/dl
+        key: ${{ runner.os }}-openwrt-dl-${{ hashFiles('openwrt/.config') }}
+        restore-keys: |
+          ${{ runner.os }}-openwrt-dl-
+
+    # 7. 缓存 ccache 编译器中间件
+    - name: Cache ccache
+      uses: actions/cache@v4
+      with:
+        path: ${{ env.CCACHE_DIR }}
+        key: ${{ runner.os }}-openwrt-ccache-${{ hashFiles('openwrt/.config') }}
+        restore-keys: |
+          ${{ runner.os }}-openwrt-ccache-
+
+    # 8. 16 线程高速预下载源码包
     - name: Download package
       id: package
       run: |
         cd openwrt
-        make defconfig
-        make download -j8
+        make download -j16
         find dl -size -1024c -exec ls -l {} \;
         find dl -size -1024c -exec rm -f {} \;
 
+    # 9. 多线程满负荷编译与精准异常捕获
     - name: Compile the firmware
       id: compile
       run: |
         cd openwrt
-        echo -e "$(nproc) thread compile"
-        make -j$(nproc) || make -j1 || make -j1 V=s
+        ccache -M $CCACHE_MAXSIZE
+        ccache -z
+        
+        NPROC=$(nproc)
+        echo "Using $((NPROC + 1)) parallel threads for compilation..."
+        
+        make -j$((NPROC + 1)) || {
+            echo "::warning::Parallel build encountered error, running single thread for diagnostics..."
+            make -j1 V=s
+        }
+        
+        echo "=== Ccache Hit Rate Statistics ==="
+        ccache -s
+        
         echo "status=success" >> $GITHUB_OUTPUT
         echo "FILE_DATE=_$(date +"%Y%m%d%H%M")" >> $GITHUB_ENV
 
+    # 10. 整理固件产物
     - name: Organize files
       id: organize
       if: env.UPLOAD_FIRMWARE == 'true' && steps.compile.outputs.status == 'success' && !cancelled()
@@ -94,6 +142,7 @@ jobs:
         echo "FIRMWARE=$PWD" >> $GITHUB_ENV
         echo "status=success" >> $GITHUB_OUTPUT
 
+    # 11. 上传构件 Artifacts
     - name: Upload firmware directory
       uses: actions/upload-artifact@v4
       if: steps.organize.outputs.status == 'success' && !cancelled()
@@ -101,13 +150,14 @@ jobs:
         name: OpenWrt_firmware_Cudy_TR3000_512MB${{ env.FILE_DATE }}
         path: ${{ env.FIRMWARE }}
 
+    # 12. 发布固件到 Release
     - name: Generate release tag
       id: tag
       if: env.UPLOAD_RELEASE == 'true' && steps.compile.outputs.status == 'success' && !cancelled()
       run: |
         echo "release_tag=$(date +"%Y.%m.%d-%H%M")" >> $GITHUB_OUTPUT
         touch release.txt
-        echo "ImmortalWrt 25.x for Cudy TR3000 512MB" >> release.txt
+        echo "ImmortalWrt 25.x for Cudy TR3000 512MB with iStore & Turbo ACC" >> release.txt
         echo "status=success" >> $GITHUB_OUTPUT
 
     - name: Upload firmware to release
