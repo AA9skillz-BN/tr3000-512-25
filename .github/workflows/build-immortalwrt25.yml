@@ -24,7 +24,7 @@ jobs:
     - name: Checkout
       uses: actions/checkout@v4
 
-    # 1. 深度清理磁盘空间以最大化 IO 吞吐
+    # 1. 深度清理磁盘空间以提升 IO 性能
     - name: Free up disk space
       uses: jlumbroso/free-disk-space@main
       with:
@@ -36,7 +36,7 @@ jobs:
         docker-images: true
         swap-storage: false
 
-    # 2. 安装编译环境依赖（内置预编译 clang/llvm 避免源码耗时编译 llvm-bpf）
+    # 2. 安装编译环境依赖（内置预装 clang/llvm）
     - name: Initialization environment
       env:
         DEBIAN_FRONTEND: noninteractive
@@ -53,7 +53,7 @@ jobs:
         sudo mkdir -p /workdir $CCACHE_DIR
         sudo chown -R $USER:$GROUPS /workdir
 
-    # 3. 浅克隆主干源码
+    # 3. 浅克隆源码
     - name: Clone source code
       working-directory: /workdir
       run: |
@@ -73,7 +73,7 @@ jobs:
     - name: Install feeds
       run: cd openwrt && ./scripts/feeds install -a
 
-    # 5. 加载配置并注入 512MB 补丁
+    # 5. 加载配置并注入 512MB 补丁与去 llvm-bpf 逻辑
     - name: Load custom configuration
       run: |
         [ -e files ] && mv files openwrt/files
@@ -83,7 +83,7 @@ jobs:
         $GITHUB_WORKSPACE/$DIY_P2_SH
         make defconfig
 
-    # 6. 安全缓存 dl 依赖包
+    # 6. 缓存 dl 源码依赖包
     - name: Cache OpenWrt dl directory
       uses: actions/cache@v4
       with:
@@ -92,7 +92,7 @@ jobs:
         restore-keys: |
           ${{ runner.os }}-openwrt-dl-
 
-    # 7. 缓存 ccache 编译器中间件
+    # 7. 缓存 ccache 编译器中间文件
     - name: Cache ccache
       uses: actions/cache@v4
       with:
@@ -110,7 +110,7 @@ jobs:
         find dl -size -1024c -exec ls -l {} \;
         find dl -size -1024c -exec rm -f {} \;
 
-    # 9. 多线程满负荷编译与精准异常捕获
+    # 9. 编译固件（多线程并发 + 错误时快速定位）
     - name: Compile the firmware
       id: compile
       run: |
