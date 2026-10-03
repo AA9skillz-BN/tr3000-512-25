@@ -121,7 +121,7 @@ jobs:
           fi
         done
 
-    # 8. 满载并发多线程编译
+    # 8. 编译固件（双保险防截断 + 自动提取报错）
     - name: Compile the firmware
       id: compile
       run: |
@@ -132,13 +132,33 @@ jobs:
         NPROC=$(nproc)
         echo "Using $((NPROC + 1)) parallel threads..."
 
-        make -j$((NPROC + 1)) || make -j1 V=s
+        # 输出并保存日志到单个文件
+        set -o pipefail
+        make -j$((NPROC + 1)) 2>&1 | tee /tmp/build.log || {
+            echo "=========================================="
+            echo "           COMPILATION FAILED             "
+            echo "=========================================="
+            echo ">>> 提取核心错误定位："
+            grep -E "ERROR:|failed to build|Error [1-9]|fatal error:" /tmp/build.log | tail -n 30 || true
+            echo "=========================================="
+            echo ">>> 报错上下文最后 50 行："
+            tail -n 50 /tmp/build.log
+            exit 1
+        }
 
         echo "=== Ccache Hit Rate Statistics ==="
         ccache -s
 
         echo "status=success" >> $GITHUB_OUTPUT
         echo "FILE_DATE=_$(date +"%Y%m%d%H%M")" >> $GITHUB_ENV
+
+    # 8.1 如果编译失败，自动将错误日志打包为 Artifact 上传，不用再去到处找下载按钮
+    - name: Upload error log on failure
+      uses: actions/upload-artifact@v4
+      if: failure()
+      with:
+        name: compilation-failure-log
+        path: /tmp/build.log
 
     # 9. 整理固件产物
     - name: Organize files
@@ -150,7 +170,7 @@ jobs:
         echo "FIRMWARE=$PWD" >> $GITHUB_ENV
         echo "status=success" >> $GITHUB_OUTPUT
 
-    # 10. 上传构件 Artifacts
+    # 10. 上传固件 Artifacts
     - name: Upload firmware directory
       uses: actions/upload-artifact@v4
       if: steps.organize.outputs.status == 'success' && !cancelled()
