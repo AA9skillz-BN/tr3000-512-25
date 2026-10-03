@@ -1,2 +1,16 @@
 #!/bin/bash
-# 可以在此处添加自定义扩展软件源 feeds
+
+# 1. 添加 iStore 官方商店源（适配 apk 架构）
+if ! grep -q "linkease/istore" feeds.conf.default; then
+    echo 'src-git istore https://github.com/linkease/istore.git;main' >> feeds.conf.default
+fi
+
+# 2. 添加 iStoreOS QuickStart 与配套后端组件官方真实源
+if ! grep -q "linkease/nas-packages" feeds.conf.default; then
+    echo 'src-git nas https://github.com/linkease/nas-packages.git;master' >> feeds.conf.default
+    echo 'src-git nas_luci https://github.com/linkease/nas-packages-luci.git;main' >> feeds.conf.default
+fi
+
+# 3. 清理并拉取 Turbo ACC 网络加速插件
+rm -rf package/luci-app-turboacc
+git clone --depth=1 -b master https://github.com/chenmozhijin/luci-app-turboacc.git package/luci-app-turboacc
