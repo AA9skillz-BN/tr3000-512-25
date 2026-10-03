@@ -10,7 +10,3 @@ if ! grep -q "linkease/nas-packages" feeds.conf.default; then
     echo 'src-git nas https://github.com/linkease/nas-packages.git;master' >> feeds.conf.default
     echo 'src-git nas_luci https://github.com/linkease/nas-packages-luci.git;main' >> feeds.conf.default
 fi
-
-# 3. 清理并拉取 Turbo ACC 网络加速插件
-rm -rf package/luci-app-turboacc
-git clone --depth=1 -b master https://github.com/chenmozhijin/luci-app-turboacc.git package/luci-app-turboacc
