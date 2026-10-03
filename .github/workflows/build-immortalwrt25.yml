@@ -3,6 +3,8 @@ name: Build ImmortalWrt 25.x for Cudy TR3000 512MB
 on:
   repository_dispatch:
   workflow_dispatch:
+  schedule:
+    - cron: '0 19 * * 3'  # UTC 19:00 周三 = 北京时间 周四 03:00 定时自动运行
 
 permissions:
   contents: write
@@ -39,7 +41,7 @@ jobs:
         docker-images: true
         swap-storage: false
 
-    # 2. 初始化环境，配置 10G Swap 防止峰值 OOM，移除 tmpfs 避免容量限制
+    # 2. 初始化环境，配置 10G Swap 防止 OOM
     - name: Initialization environment
       env:
         DEBIAN_FRONTEND: noninteractive
@@ -51,7 +53,7 @@ jobs:
         libltdl-dev libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev libpython3-dev libreadline-dev \
         libssl-dev libtool lrzsz mkisofs msmtp nano ninja-build psmisc python3 python3-pyelftools python3-setuptools \
         qemu-utils rsync scons squashfs-tools subversion swig texinfo uglifyjs upx-ucl unzip vim wget xmlto \
-        zlib1g-dev clang llvm lld
+        zlib1g-dev clang llvm lld jq
         sudo timedatectl set-timezone "$TZ"
 
         sudo fallocate -l 10G /swapfile_ram
@@ -91,7 +93,7 @@ jobs:
         cd openwrt
         $GITHUB_WORKSPACE/$DIY_P2_SH
 
-        # 速度优化：关闭冗余调试信息生成，大幅减少磁盘 I/O 写入
+        # 速度优化：关闭内核冗余调试符号
         sed -i 's/CONFIG_COLLECT_KERNEL_DEBUG=y/CONFIG_COLLECT_KERNEL_DEBUG=n/' .config || true
         echo "CONFIG_NO_STRIP=n" >> .config
         echo "CONFIG_USE_STRIP=y" >> .config
@@ -107,7 +109,7 @@ jobs:
         restore-keys: |
           ${{ runner.os }}-openwrt-ccache-v5-
 
-    # 7. 16 线程高速下载依赖包
+    # 7. 并发高速下载依赖包
     - name: Download package
       id: package
       run: |
@@ -123,7 +125,7 @@ jobs:
           fi
         done
 
-    # 8. 编译固件（安全状态判定 + 核心报错过滤 + 防截断）
+    # 8. 编译固件（多线程并发 + 安全返回值判定 + 错误定向提取）
     - name: Compile the firmware
       id: compile
       run: |
@@ -155,7 +157,7 @@ jobs:
         echo "status=success" >> $GITHUB_OUTPUT
         echo "FILE_DATE=_$(date +"%Y%m%d%H%M")" >> $GITHUB_ENV
 
-    # 8.1 失败自动打包日志至 Artifact
+    # 8.1 失败自动打包日志
     - name: Upload error log on failure
       uses: actions/upload-artifact@v4
       if: failure()
@@ -173,7 +175,7 @@ jobs:
         echo "FIRMWARE=$PWD" >> $GITHUB_ENV
         echo "status=success" >> $GITHUB_OUTPUT
 
-    # 10. 上传构件 Artifacts
+    # 10. 上传固件至 Artifacts
     - name: Upload firmware directory
       uses: actions/upload-artifact@v4
       if: steps.organize.outputs.status == 'success' && !cancelled()
@@ -181,7 +183,7 @@ jobs:
         name: OpenWrt_firmware_Cudy_TR3000_512MB${{ env.FILE_DATE }}
         path: ${{ env.FIRMWARE }}
 
-    # 11. 自动发布至 Release
+    # 11. 自动发布固件至 GitHub Releases
     - name: Generate release tag
       id: tag
       if: env.UPLOAD_RELEASE == 'true' && steps.compile.outputs.status == 'success' && !cancelled()
