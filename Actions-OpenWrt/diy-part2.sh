@@ -1,16 +1,36 @@
 #!/bin/bash
+#
+# Copyright (c) 2019-2020 P3TERX <https://p3terx.com>
+#
+# This is free software, licensed under the MIT License.
+# See /LICENSE for more information.
+#
+# https://github.com/P3TERX/Actions-OpenWrt
+# File name: diy-part2.sh
+# Description: OpenWrt DIY script part 2 (After Update feeds)
+#
 
-# 1. 复制 512MB 设备树至 target 目录
-cp -f "$GITHUB_WORKSPACE/openwrt-mod/mt7981b-cudy-tr3000-512mb-v1.dts" target/linux/mediatek/dts/
-
-# 2. 追加 512MB 编译规则至 filogic.mk
-if ! grep -q "cudy_tr3000-512mb" target/linux/mediatek/image/filogic.mk; then
-    cat "$GITHUB_WORKSPACE/openwrt-mod/cudy-tr3000-512.mk" >> target/linux/mediatek/image/filogic.mk
-fi
-
-# 3. 【核心加速】从 tools 编译链中直接抹除耗时 1.5 小时的 llvm-bpf 编译入口
-sed -i '/llvm-bpf/d' tools/Makefile
-sed -i 's/CONFIG_TOOLS_LLVM_BPF=y/# CONFIG_TOOLS_LLVM_BPF is not set/g' .config 2>/dev/null || true
-sed -i 's/CONFIG_KERNEL_BPF_TOOLCHAIN=y/# CONFIG_KERNEL_BPF_TOOLCHAIN is not set/g' .config 2>/dev/null || true
-# 修复 libubox 快照补丁冲突问题
+# 1. 清理 libubox 快照补丁冲突
 rm -rf package/libs/libubox/patches
+
+# 2. 注入中兴 F50 5G 随身 WiFi 的全套驱动与依赖环境
+cat >> .config <<EOF
+# USB 基础子系统与 USB3.0 控制器驱动
+CONFIG_PACKAGE_kmod-usb-core=y
+CONFIG_PACKAGE_kmod-usb3=y
+
+# F50 虚拟以太网驱动协议（全覆盖：CDC-Ether / CDC-NCM / RNDIS）
+CONFIG_PACKAGE_kmod-usb-net=y
+CONFIG_PACKAGE_kmod-usb-net-cdc-ether=y
+CONFIG_PACKAGE_kmod-usb-net-cdc-ncm=y
+CONFIG_PACKAGE_kmod-usb-net-rndis=y
+
+# 串口与模式切换支持（防虚拟光驱锁死，支持后台 AT 调试）
+CONFIG_PACKAGE_kmod-usb-serial=y
+CONFIG_PACKAGE_kmod-usb-serial-option=y
+CONFIG_PACKAGE_kmod-usb-serial-wwan=y
+CONFIG_PACKAGE_usb-modeswitch=y
+CONFIG_PACKAGE_usbutils=y
+CONFIG_PACKAGE_kmod-nls-base=y
+CONFIG_PACKAGE_kmod-nls-utf8=y
+EOF
