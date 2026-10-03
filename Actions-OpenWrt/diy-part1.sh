@@ -1,12 +1,17 @@
 #!/bin/bash
+#
+# Copyright (c) 2019-2020 P3TERX <https://p3terx.com>
+#
+# This is free software, licensed under the MIT License.
+# See /LICENSE for more information.
+#
+# https://github.com/P3TERX/Actions-OpenWrt
+# File name: diy-part1.sh
+# Description: OpenWrt DIY script part 1 (Before Update feeds)
+#
 
-# 1. 添加 iStore 官方商店源（适配 25.x apk 架构）
-if ! grep -q "linkease/istore" feeds.conf.default; then
-    echo 'src-git istore https://github.com/linkease/istore.git;main' >> feeds.conf.default
-fi
+# Uncomment a feed source
+#sed -i 's/^#\(.*helloworld\)/\1/' feeds.conf.default
 
-# 2. 添加 iStoreOS QuickStart 与配套后端组件官方真实源
-if ! grep -q "linkease/nas-packages" feeds.conf.default; then
-    echo 'src-git nas https://github.com/linkease/nas-packages.git;master' >> feeds.conf.default
-    echo 'src-git nas_luci https://github.com/linkease/nas-packages-luci.git;main' >> feeds.conf.default
-fi
+# Add a feed source
+#echo 'src-git passwall https://github.com/xiaorouji/openwrt-passwall' >>feeds.conf.default
