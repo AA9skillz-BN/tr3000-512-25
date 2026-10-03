@@ -13,7 +13,6 @@ env:
   UPLOAD_FIRMWARE: true
   UPLOAD_RELEASE: true
   TZ: Asia/Shanghai
-  # ccache 放在物理磁盘缓存，不抢占内存
   CCACHE_DIR: /home/runner/.ccache
   CCACHE_MAXSIZE: 5G
 
@@ -25,7 +24,7 @@ jobs:
     - name: Checkout
       uses: actions/checkout@v4
 
-    # 1. 深度清理磁盘并腾出最大可用空间
+    # 1. 深度清理磁盘空间
     - name: Free up disk space
       uses: jlumbroso/free-disk-space@main
       with:
@@ -37,7 +36,7 @@ jobs:
         docker-images: true
         swap-storage: false
 
-    # 2. 准备系统依赖，配置 Swap 兜底并挂载 tmpfs 内存盘（移植 237 极速编译核心）
+    # 2. 初始化环境，配置 10GB Swap 与 12GB tmpfs 内存盘
     - name: Initialization environment & Mount tmpfs
       env:
         DEBIAN_FRONTEND: noninteractive
@@ -52,13 +51,13 @@ jobs:
         zlib1g-dev clang llvm lld
         sudo timedatectl set-timezone "$TZ"
 
-        # 创建 10GB 专用高速 Swap 缓冲，防止内存盘爆满崩溃
+        # 挂载 10G Swap 缓冲，防止内存盘爆满
         sudo fallocate -l 10G /swapfile_ram
         sudo chmod 600 /swapfile_ram
         sudo mkswap /swapfile_ram
         sudo swapon /swapfile_ram
 
-        # 挂载 12G tmpfs 内存盘作为工作空间（物理内存 + Swap 自动平衡，压榨极限 IO）
+        # 挂载 12G tmpfs 内存盘加速磁盘 IO
         sudo mkdir -p /workdir $CCACHE_DIR
         sudo mount -t tmpfs -o size=12G tmpfs /workdir
         sudo chown -R $USER:$GROUPS /workdir $CCACHE_DIR
@@ -70,7 +69,7 @@ jobs:
         git clone --depth 1 $REPO_URL -b $REPO_BRANCH openwrt
         ln -sf /workdir/openwrt $GITHUB_WORKSPACE/openwrt
 
-    # 4. 加载自定义 feeds 与插件
+    # 4. 加载 feeds 与第三方依赖
     - name: Load custom feeds
       run: |
         chmod +x $DIY_P1_SH
@@ -93,32 +92,46 @@ jobs:
         $GITHUB_WORKSPACE/$DIY_P2_SH
         make defconfig
 
-    # 6. 安全缓存 dl 源码包
+    # 6. 安全缓存 dl 源码包（Key 加 v2 规避之前的坏包缓存）
     - name: Cache OpenWrt dl directory
       uses: actions/cache@v4
       with:
         path: openwrt/dl
-        key: ${{ runner.os }}-openwrt-dl-${{ hashFiles('openwrt/.config') }}
+        key: ${{ runner.os }}-openwrt-dl-v2-${{ hashFiles('openwrt/.config') }}
         restore-keys: |
-          ${{ runner.os }}-openwrt-dl-
+          ${{ runner.os }}-openwrt-dl-v2-
 
     # 7. 缓存 ccache 编译器中间件
     - name: Cache ccache
       uses: actions/cache@v4
       with:
         path: ${{ env.CCACHE_DIR }}
-        key: ${{ runner.os }}-openwrt-ccache-${{ hashFiles('openwrt/.config') }}
+        key: ${{ runner.os }}-openwrt-ccache-v2-${{ hashFiles('openwrt/.config') }}
         restore-keys: |
-          ${{ runner.os }}-openwrt-ccache-
+          ${{ runner.os }}-openwrt-ccache-v2-
 
-    # 8. 16 线程高速预下载源码包
+    # 8. 高速预下载源码包并清理一切损坏的 tar 归档（彻底解决 tar 损坏退出问题）
     - name: Download package
       id: package
       run: |
         cd openwrt
         make download -j16
-        find dl -size -1024c -exec ls -l {} \;
+        
+        # 1. 删除小于 1KB 的残损文件
         find dl -size -1024c -exec rm -f {} \;
+        
+        # 2. 逐一验证所有 tar 压缩包完整性，损坏的包就地抹除
+        for file in dl/*.tar.* dl/*.tgz; do
+          if [ -f "$file" ]; then
+            tar -tf "$file" >/dev/null 2>&1 || {
+              echo "::warning::Corrupt archive detected and removed: $file"
+              rm -f "$file"
+            }
+          fi
+        done
+        
+        # 3. 针对被清理的残缺包补救重新下载
+        make download -j8
 
     # 9. 【极速编译 Compile The Firmware】内存盘 + ccache + 多线程满载
     - name: Compile the firmware
@@ -131,7 +144,7 @@ jobs:
         NPROC=$(nproc)
         echo "Using $((NPROC + 1)) parallel threads on tmpfs memory disk..."
         
-        # 满载并发；遇到中断只定位具体目标，杜绝无效重跑
+        # 优先满载并发，失败时精确定位错误
         make -j$((NPROC + 1)) || make -j1 V=s
         
         echo "=== Ccache Hit Rate Statistics ==="
@@ -165,7 +178,7 @@ jobs:
       run: |
         echo "release_tag=$(date +"%Y.%m.%d-%H%M")" >> $GITHUB_OUTPUT
         touch release.txt
-        echo "ImmortalWrt 25.x for Cudy TR3000 512MB with iStore & Turbo ACC (Optimized Build)" >> release.txt
+        echo "ImmortalWrt 25.x for Cudy TR3000 512MB" >> release.txt
         echo "status=success" >> $GITHUB_OUTPUT
 
     - name: Upload firmware to release
