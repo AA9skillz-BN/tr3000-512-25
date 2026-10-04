@@ -16,15 +16,22 @@ rm -rf package/libs/libubox/patches
 # 2. 将默认后台管理 IP 修改为 192.168.6.1
 sed -i 's/192.168.1.1/192.168.6.1/g' package/base-files/files/bin/config_generate
 
-# 3. 强制指定目标平台与 Cudy TR3000 512MB 机型（防止 fallback 到 openwrt_one）
+# 3. 扩容 Cudy TR3000 UBI 分区以完全吃满 512MB SPI-NAND 物理闪存
+find target/linux/mediatek/ -type f \( -name "*cudy*tr3000*.dts*" -o -name "*cudy*tr3000*.dtsi*" \) | while read -r f; do
+    echo "Applying 512MB Flash patch to $f"
+    sed -i 's/0x4000000/0x1fa00000/g' "$f"
+    sed -i 's/0x04000000/0x1fa00000/g' "$f"
+done
+
+# 4. 强制指定目标平台与 Cudy TR3000 512MB 机型（统一保持 512mb 标识）
 cat >> .config <<EOF
 CONFIG_TARGET_mediatek=y
 CONFIG_TARGET_mediatek_filogic=y
-CONFIG_TARGET_mediatek_filogic_DEVICE_cudy_tr3000-v1=y
-CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_cudy_tr3000-v1=y
+CONFIG_TARGET_mediatek_filogic_DEVICE_cudy_tr3000-512mb=y
+CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_cudy_tr3000-512mb=y
 EOF
 
-# 4. 注入中兴 F50 5G 随身 WiFi 的全套驱动与依赖环境
+# 5. 注入中兴 F50 5G 随身 WiFi 的全套驱动与依赖环境
 cat >> .config <<EOF
 # USB 基础子系统与 USB3.0 控制器驱动
 CONFIG_PACKAGE_kmod-usb-core=y
@@ -51,11 +58,95 @@ CONFIG_PACKAGE_jq=y
 CONFIG_PACKAGE_luci-app-commands=y
 EOF
 
-# 5. 植入固件在线一键更新核心脚本（内置写死绑定你的仓库：AA9skillz-BN/tr3000-512-25）
+# 6. 注入开机自启预设 (双频 Wi-Fi 160MHz 满血 + F50 eth2 自动拨号)
+mkdir -p package/base-files/files/etc/uci-defaults
+cat << 'EOF' > package/base-files/files/etc/uci-defaults/99-custom-settings
+#!/bin/sh
+
+# === A. 无线配置 (2.4G 信道 6, 5G 信道 36 满血 160MHz) ===
+if [ ! -f /etc/config/wireless ]; then
+    wifi config
+fi
+
+uci -q delete wireless.radio0
+uci -q delete wireless.default_radio0
+uci set wireless.radio0=wifi-device
+uci set wireless.radio0.type='mac80211'
+uci set wireless.radio0.path='platform/soc/18000000.wifi'
+uci set wireless.radio0.band='2g'
+uci set wireless.radio0.channel='6'
+uci set wireless.radio0.htmode='HE20'
+uci set wireless.radio0.country='CN'
+uci set wireless.radio0.cell_density='0'
+uci set wireless.radio0.disabled='0'
+
+uci set wireless.default_radio0=wifi-iface
+uci set wireless.default_radio0.device='radio0'
+uci set wireless.default_radio0.network='lan'
+uci set wireless.default_radio0.mode='ap'
+uci set wireless.default_radio0.ssid='ImmortalWrt_2.4G'
+uci set wireless.default_radio0.encryption='psk2'
+uci set wireless.default_radio0.key='q19980720ZJX#'
+uci set wireless.default_radio0.disabled='0'
+
+uci -q delete wireless.radio1
+uci -q delete wireless.default_radio1
+uci set wireless.radio1=wifi-device
+uci set wireless.radio1.type='mac80211'
+uci set wireless.radio1.path='platform/soc/18000000.wifi+1'
+uci set wireless.radio1.band='5g'
+uci set wireless.radio1.channel='36'
+uci set wireless.radio1.htmode='HE160'
+uci set wireless.radio1.country='CN'
+uci set wireless.radio1.cell_density='0'
+uci set wireless.radio1.disabled='0'
+
+uci set wireless.default_radio1=wifi-iface
+uci set wireless.default_radio1.device='radio1'
+uci set wireless.default_radio1.network='lan'
+uci set wireless.default_radio1.mode='ap'
+uci set wireless.default_radio1.ssid='ImmortalWrt_5G'
+uci set wireless.default_radio1.encryption='psk2'
+uci set wireless.default_radio1.key='q19980720ZJX#'
+uci set wireless.default_radio1.disabled='0'
+uci commit wireless
+
+# === B. 中兴 F50 USB 网卡 (eth2) 自动配置与防火墙绑定 ===
+uci -q delete network.MODEM
+uci set network.MODEM=interface
+uci set network.MODEM.proto='dhcp'
+uci set network.MODEM.device='eth2'
+uci commit network
+
+uci add_list firewall.@zone[1].network='MODEM'
+uci commit firewall
+
+# === C. 开启硬件加速流控 ===
+if [ -f /etc/config/turboacc ]; then
+    uci set turboacc.config.sw_flow='1'
+    uci set turboacc.config.hw_flow='1'
+    uci set turboacc.config.bbr_cca='1'
+    uci set turboacc.config.fullcone_nat='1'
+    uci commit turboacc
+fi
+
+uci set firewall.@defaults[0].flow_offloading='1'
+uci set firewall.@defaults[0].flow_offloading_hw='1'
+uci commit firewall
+
+# 生效所有网络与服务
+/etc/init.d/network reload
+wifi reload
+
+exit 0
+EOF
+chmod +x package/base-files/files/etc/uci-defaults/99-custom-settings
+
+# 7. 植入固件在线一键更新核心脚本（绑定 AA9skillz-BN/tr3000-512-25）
 mkdir -p package/base-files/files/usr/bin
 cat <<'EOF' > package/base-files/files/usr/bin/autoupdate
 #!/bin/sh
-# 路由器一键拉取 GitHub 最新 Release 并自动保留配置升级
+# 路由器一键拉取 GitHub 最新 Release 并自动升级
 
 GITHUB_REPO="AA9skillz-BN/tr3000-512-25"
 
@@ -87,18 +178,18 @@ fi
 
 echo "固件下载成功，文件完整！"
 echo ""
-echo "[3/3] 即将执行保留配置升级 (sysupgrade -u)..."
+echo "[3/3] 即将执行升级 (sysupgrade)..."
 echo "升级期间请勿断电，设备将在 1-2 分钟内自动刷写并重启！"
 echo "==============================================="
 
 # 后台延迟 2 秒拉起升级，确保前端 Web 页面能完整输出日志
-( sleep 2 && sysupgrade -u /tmp/sysupgrade.bin ) >/dev/null 2>&1 &
+( sleep 2 && sysupgrade -n /tmp/sysupgrade.bin ) >/dev/null 2>&1 &
 exit 0
 EOF
 
 chmod +x package/base-files/files/usr/bin/autoupdate
 
-# 6. 配置 Web 界面“自定义命令（luci-app-commands）”菜单卡片
+# 8. 配置 Web 界面“自定义命令（luci-app-commands）”菜单卡片
 mkdir -p package/base-files/files/etc/config
 cat <<'EOF' > package/base-files/files/etc/config/luci_commands
 config command
