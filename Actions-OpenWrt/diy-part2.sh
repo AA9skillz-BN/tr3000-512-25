@@ -1,10 +1,10 @@
 #!/bin/bash
 # Description: OpenWrt DIY script part 2 (After Update feeds)
 
-# 1. 修正默认主机名与机型标识
+# 1. 修正默认主机名
 sed -i 's/OpenWrt/ImmortalWrt-TR3000/g' package/base-files/files/bin/config_generate
 
-# 2. 注入开机自启初始化脚本 (仅保留网络、Wi-Fi 与 OTA 命令注册)
+# 2. 注入开机自启初始化脚本
 mkdir -p files/etc/uci-defaults
 cat << 'EOF' > files/etc/uci-defaults/99-custom-settings
 #!/bin/sh
@@ -44,7 +44,7 @@ exit 0
 EOF
 chmod +x files/etc/uci-defaults/99-custom-settings
 
-# 3. 注入固件在线更新脚本 (带合法性校验，杜绝变砖风险)
+# 3. 注入固件在线更新脚本 (自动匹配 cudy_tr3000-v1 产物)
 mkdir -p files/usr/bin
 cat << 'EOF' > files/usr/bin/autoupdate
 #!/bin/sh
@@ -58,7 +58,7 @@ if [ -z "$LATEST_TAG" ]; then
     exit 1
 fi
 
-DOWNLOAD_URL="https://github.com/${REPO}/releases/download/${LATEST_TAG}/immortalwrt-mediatek-filogic-cudy_tr3000-512mb-squashfs-sysupgrade.bin"
+DOWNLOAD_URL="https://github.com/${REPO}/releases/download/${LATEST_TAG}/immortalwrt-mediatek-filogic-cudy_tr3000-v1-squashfs-sysupgrade.bin"
 echo "[OTA] 发现最新版本: ${LATEST_TAG}"
 echo "[OTA] 正在下载固件..."
 
