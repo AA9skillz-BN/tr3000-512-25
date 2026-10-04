@@ -131,7 +131,7 @@ jobs:
           fi
         done
 
-    # 8. 编译固件（多线程并发 + 安全返回值判定 + 错误定向提取）
+   # 8. 编译固件（多线程并发 + 自动单线程自愈兜底）
     - name: Compile the firmware
       id: compile
       run: |
@@ -142,27 +142,15 @@ jobs:
         NPROC=$(nproc)
         echo "Using $((NPROC + 1)) parallel threads..."
 
-        make -j$((NPROC + 1)) 2>&1 | tee /tmp/build.log
-        RET=${PIPESTATUS[0]}
-
-        if [ $RET -ne 0 ]; then
-            echo "=========================================="
-            echo "           COMPILATION FAILED             "
-            echo "=========================================="
-            echo ">>> 提取关键错误行："
-            grep -E "ERROR:|failed to build|Error [1-9]|fatal error:" /tmp/build.log | tail -n 30 || true
-            echo "=========================================="
-            echo ">>> 报错附近最后 50 行日志："
-            tail -n 50 /tmp/build.log
-            exit $RET
-        fi
+        # 核心：多线程失败时自动回退单线程重试，单线程具备严格的拓扑顺序，可直接理顺依赖
+        make -j$((NPROC + 1)) || make -j1 V=s
 
         echo "=== Ccache Hit Rate Statistics ==="
         ccache -s
 
         echo "status=success" >> $GITHUB_OUTPUT
         echo "FILE_DATE=_$(date +"%Y%m%d%H%M")" >> $GITHUB_ENV
-
+    
     # 8.1 失败自动打包日志
     - name: Upload error log on failure
       uses: actions/upload-artifact@v4
