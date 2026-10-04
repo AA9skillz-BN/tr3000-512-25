@@ -84,10 +84,11 @@ jobs:
     - name: Install feeds
       run: cd openwrt && ./scripts/feeds install -a
 
-    # 4.1 注入 512MB 设备树与 Profile（覆盖官方定义，确保 100% 触发生成镜像）
+    # 4.1 注入 512MB 设备树与 Profile（清理官方旧定义避免重复报错，再安全追加）
     - name: Apply 512MB Device Tree & Profile
       run: |
         cp openwrt-mod/mt7981b-cudy-tr3000-512mb-v1.dts openwrt/target/linux/mediatek/dts/mt7981b-cudy-tr3000-v1.dts
+        sed -i '/define Device\/cudy_tr3000-v1/,/endef/d' openwrt/target/linux/mediatek/image/filogic.mk || true
         cat openwrt-mod/cudy-tr3000-512.mk >> openwrt/target/linux/mediatek/image/filogic.mk
 
     # 5. 加载配置并注入编译优化参数
