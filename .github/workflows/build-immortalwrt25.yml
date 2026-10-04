@@ -45,18 +45,6 @@ jobs:
         git clone $REPO_URL -b $REPO_BRANCH openwrt
         ln -sf /workdir/openwrt $GITHUB_WORKSPACE/openwrt
 
-    - name: Cache Toolchain and Ccache
-      uses: actions/cache@v4
-      with:
-        path: |
-          openwrt/staging_dir/host
-          openwrt/staging_dir/toolchain-*
-          openwrt/build_dir/toolchain-*
-          ~/.ccache
-        key: ${{ runner.os }}-toolchain-filogic-${{ hashFiles('openwrt-mod/config/minimum.config') }}
-        restore-keys: |
-          ${{ runner.os }}-toolchain-filogic-
-
     - name: Load custom feeds
       run: |
         [ -e $FEEDS_CONF ] && cp $FEEDS_CONF openwrt/feeds.conf.default
@@ -96,26 +84,9 @@ jobs:
       id: compile
       run: |
         cd openwrt
-        echo "::group::Pre-compiling mac80211 dependency"
-        make package/kernel/mac80211/compile -j$(nproc) || make package/kernel/mac80211/compile -j1 V=s
-        echo "::endgroup::"
         echo -e "$(nproc) thread compile"
-        if ! make -j$(nproc); then
-          echo "[警告] 多线程编译未通过，正在进行单线程错误追踪并捕获日志..."
-          make -j1 V=s 2>&1 | tee ../build.log || true
-          echo "::group::==== 构建失败关键报错汇总 ===="
-          tail -n 200 ../build.log
-          echo "::endgroup::"
-          exit 1
-        fi
+        make -j$(nproc) || make -j1 V=s
         echo "status=success" >> $GITHUB_OUTPUT
-        
-    - name: Upload error log on failure
-      uses: actions/upload-artifact@v4
-      if: steps.compile.outputs.status != 'success' && !cancelled()
-      with:
-        name: OpenWrt_build_error_log
-        path: build.log
 
     - name: Check space usage
       if: steps.compile.outputs.status == 'success' && !cancelled()
