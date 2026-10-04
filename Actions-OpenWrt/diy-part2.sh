@@ -4,8 +4,10 @@
 # 1. 修正默认主机名
 sed -i 's/OpenWrt/ImmortalWrt-TR3000/g' package/base-files/files/bin/config_generate
 
-# 2. 清理 mt76 编译中间缓存，防止脏版本冲突
-rm -rf package/kernel/mt76/.ver_*
+# 2. 清理无线驱动中间状态，避免多线程依赖缺失
+rm -rf package/kernel/mt76/.ver_* package/kernel/mac80211/.ver_*
+rm -rf build_dir/target-*/linux-mediatek_filogic/mt76-*
+rm -rf build_dir/target-*/linux-mediatek_filogic/mac80211-*
 
 # 3. 注入开机自启初始化脚本
 mkdir -p files/etc/uci-defaults
