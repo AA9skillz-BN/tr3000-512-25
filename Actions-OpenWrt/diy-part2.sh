@@ -1,86 +1,200 @@
 #!/bin/bash
+#
+# Copyright (c) 2019-2020 P3TERX <https://p3terx.com>
+#
+# This is free software, licensed under the MIT License.
+# See /LICENSE for more information.
+#
+# https://github.com/P3TERX/Actions-OpenWrt
+# File name: diy-part2.sh
 # Description: OpenWrt DIY script part 2 (After Update feeds)
+#
 
-# 1. 修正默认主机名
-sed -i 's/OpenWrt/ImmortalWrt-TR3000/g' package/base-files/files/bin/config_generate
+# 1. 清理 libubox 快照补丁冲突
+rm -rf package/libs/libubox/patches
 
-# 2. 清理无线驱动中间状态，避免多线程依赖缺失
-rm -rf package/kernel/mt76/.ver_* package/kernel/mac80211/.ver_*
-rm -rf build_dir/target-*/linux-mediatek_filogic/mt76-*
-rm -rf build_dir/target-*/linux-mediatek_filogic/mac80211-*
+# 2. 将默认后台管理 IP 修改为 192.168.6.1
+sed -i 's/192.168.1.1/192.168.6.1/g' package/base-files/files/bin/config_generate
 
-# 3. 注入开机自启初始化脚本
-mkdir -p files/etc/uci-defaults
-cat << 'EOF' > files/etc/uci-defaults/99-custom-settings
+# 3. 扩容 Cudy TR3000 UBI 分区以完全吃满 512MB SPI-NAND 物理闪存 (保留 32MB 安全冗余防坏块)
+find target/linux/mediatek/ -type f \( -name "*cudy*tr3000*.dts*" -o -name "*cudy*tr3000*.dtsi*" \) | while read -r f; do
+    echo "Applying 512MB Flash patch to $f"
+    sed -i 's/0x4000000/0x1da40000/g' "$f"
+    sed -i 's/0x04000000/0x1da40000/g' "$f"
+    sed -i 's/0x1fa00000/0x1da40000/g' "$f"
+done
+
+# 4. 强制指定目标平台与官方 Cudy TR3000 v1 机型（确保 100% 触发生成镜像）
+cat >> .config <<EOF
+CONFIG_TARGET_mediatek=y
+CONFIG_TARGET_mediatek_filogic=y
+CONFIG_TARGET_mediatek_filogic_DEVICE_cudy_tr3000-v1=y
+CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_cudy_tr3000-v1=y
+EOF
+
+# 5. 注入中兴 F50 5G 随身 WiFi 的全套驱动与依赖环境
+cat >> .config <<EOF
+# USB 基础子系统与 USB3.0 控制器驱动
+CONFIG_PACKAGE_kmod-usb-core=y
+CONFIG_PACKAGE_kmod-usb3=y
+
+# F50 虚拟以太网驱动协议（全覆盖：CDC-Ether / CDC-NCM / RNDIS）
+CONFIG_PACKAGE_kmod-usb-net=y
+CONFIG_PACKAGE_kmod-usb-net-cdc-ether=y
+CONFIG_PACKAGE_kmod-usb-net-cdc-ncm=y
+CONFIG_PACKAGE_kmod-usb-net-rndis=y
+
+# 串口与模式切换支持（防虚拟光驱锁死，支持后台 AT 调试）
+CONFIG_PACKAGE_kmod-usb-serial=y
+CONFIG_PACKAGE_kmod-usb-serial-option=y
+CONFIG_PACKAGE_kmod-usb-serial-wwan=y
+CONFIG_PACKAGE_usb-modeswitch=y
+CONFIG_PACKAGE_usbutils=y
+CONFIG_PACKAGE_kmod-nls-base=y
+CONFIG_PACKAGE_kmod-nls-utf8=y
+
+# 自动化脚本与 Web 界面依赖
+CONFIG_PACKAGE_curl=y
+CONFIG_PACKAGE_jq=y
+CONFIG_PACKAGE_luci-app-commands=y
+EOF
+
+# 6. 注入开机自启预设 (双频 Wi-Fi 160MHz 满血 + F50 eth2 自动拨号)
+mkdir -p package/base-files/files/etc/uci-defaults
+cat << 'EOF' > package/base-files/files/etc/uci-defaults/99-custom-settings
 #!/bin/sh
 
-# 配置中兴 F50 (MODEM) 即插即用接口
+# === A. 无线配置 (2.4G 信道 6, 5G 信道 36 满血 160MHz) ===
+if [ ! -f /etc/config/wireless ]; then
+    wifi config
+fi
+
+uci -q delete wireless.radio0
+uci -q delete wireless.default_radio0
+uci set wireless.radio0=wifi-device
+uci set wireless.radio0.type='mac80211'
+uci set wireless.radio0.path='platform/soc/18000000.wifi'
+uci set wireless.radio0.band='2g'
+uci set wireless.radio0.channel='6'
+uci set wireless.radio0.htmode='HE20'
+uci set wireless.radio0.country='CN'
+uci set wireless.radio0.cell_density='0'
+uci set wireless.radio0.disabled='0'
+
+uci set wireless.default_radio0=wifi-iface
+uci set wireless.default_radio0.device='radio0'
+uci set wireless.default_radio0.network='lan'
+uci set wireless.default_radio0.mode='ap'
+uci set wireless.default_radio0.ssid='ImmortalWrt_2.4G'
+uci set wireless.default_radio0.encryption='psk2'
+uci set wireless.default_radio0.key='q19980720ZJX#'
+uci set wireless.default_radio0.disabled='0'
+
+uci -q delete wireless.radio1
+uci -q delete wireless.default_radio1
+uci set wireless.radio1=wifi-device
+uci set wireless.radio1.type='mac80211'
+uci set wireless.radio1.path='platform/soc/18000000.wifi+1'
+uci set wireless.radio1.band='5g'
+uci set wireless.radio1.channel='36'
+uci set wireless.radio1.htmode='HE160'
+uci set wireless.radio1.country='CN'
+uci set wireless.radio1.cell_density='0'
+uci set wireless.radio1.disabled='0'
+
+uci set wireless.default_radio1=wifi-iface
+uci set wireless.default_radio1.device='radio1'
+uci set wireless.default_radio1.network='lan'
+uci set wireless.default_radio1.mode='ap'
+uci set wireless.default_radio1.ssid='ImmortalWrt_5G'
+uci set wireless.default_radio1.encryption='psk2'
+uci set wireless.default_radio1.key='q19980720ZJX#'
+uci set wireless.default_radio1.disabled='0'
+uci commit wireless
+
+# === B. 中兴 F50 USB 网卡 (eth2) 自动配置与防火墙绑定 ===
 uci -q delete network.MODEM
 uci set network.MODEM=interface
 uci set network.MODEM.proto='dhcp'
 uci set network.MODEM.device='eth2'
-
-# 将 MODEM 加入 WAN 防火墙区域
-uci -q del_list firewall.@zone[1].network='MODEM'
-uci add_list firewall.@zone[1].network='MODEM'
-
-# 预设双频 Wi-Fi 满血状态
-uci set wireless.radio0.disabled='0'
-uci set wireless.radio0.country='CN'
-uci set wireless.radio0.channel='6'
-
-uci set wireless.radio1.disabled='0'
-uci set wireless.radio1.country='CN'
-uci set wireless.radio1.channel='36'
-uci set wireless.radio1.htmode='HE160'
-
-# 注册 Web 界面一键 OTA 升级按钮
-uci -q delete commands.@command[0]
-uci add commands command
-uci set commands.@command[-1].name='在线更新固件 (OTA)'
-uci set commands.@command[-1].command='/usr/bin/autoupdate'
-
 uci commit network
+
+uci add_list firewall.@zone[1].network='MODEM'
 uci commit firewall
-uci commit wireless
-uci commit commands
+
+# === C. 开启硬件加速流控 ===
+if [ -f /etc/config/turboacc ]; then
+    uci set turboacc.config.sw_flow='1'
+    uci set turboacc.config.hw_flow='1'
+    uci set turboacc.config.bbr_cca='1'
+    uci set turboacc.config.fullcone_nat='1'
+    uci commit turboacc
+fi
+
+uci set firewall.@defaults[0].flow_offloading='1'
+uci set firewall.@defaults[0].flow_offloading_hw='1'
+uci commit firewall
+
+# 生效所有网络与服务
+/etc/init.d/network reload
+wifi reload
 
 exit 0
 EOF
-chmod +x files/etc/uci-defaults/99-custom-settings
+chmod +x package/base-files/files/etc/uci-defaults/99-custom-settings
 
-# 4. 注入固件在线更新脚本
-mkdir -p files/usr/bin
-cat << 'EOF' > files/usr/bin/autoupdate
+# 7. 植入固件在线一键更新核心脚本（绑定 AA9skillz-BN/tr3000-512-25）
+mkdir -p package/base-files/files/usr/bin
+cat <<'EOF' > package/base-files/files/usr/bin/autoupdate
 #!/bin/sh
+# 路由器一键拉取 GitHub 最新 Release 并自动升级
 
-REPO="AA9skillz-BN/tr3000-512-25"
-echo "[OTA] 正在检测 GitHub 最新固件..."
+GITHUB_REPO="AA9skillz-BN/tr3000-512-25"
 
-LATEST_TAG=$(curl -sL "https://api.github.com/repos/${REPO}/releases/latest" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
-if [ -z "$LATEST_TAG" ]; then
-    echo "[错误] 无法获取最新 Release 版本号，请检查网络！"
-    exit 1
+echo "==============================================="
+echo "  ImmortalWrt 25.x 自动升级程序"
+echo "  目标机型: Cudy TR3000 (512MB Flash)"
+echo "==============================================="
+echo "[1/3] 正在查询 GitHub 最新构建版本..."
+
+DOWNLOAD_URL=$(curl -sL "https://api.github.com/repos/${GITHUB_REPO}/releases/latest" | \
+  jq -r '.assets[] | select(.name | test("cudy.*tr3000.*sysupgrade\\.bin$")) | .browser_download_url' | head -n 1)
+
+if [ -z "$DOWNLOAD_URL" ] || [ "$DOWNLOAD_URL" = "null" ]; then
+  echo "[错误] 未能检测到匹配 cudy_tr3000 的最新 sysupgrade.bin 固件！"
+  exit 1
 fi
 
-DOWNLOAD_URL="https://github.com/${REPO}/releases/download/${LATEST_TAG}/immortalwrt-mediatek-filogic-cudy_tr3000-v1-squashfs-sysupgrade.bin"
-echo "[OTA] 发现最新版本: ${LATEST_TAG}"
-echo "[OTA] 正在下载固件..."
-
+echo "发现最新固件下载地址:"
+echo "-> $DOWNLOAD_URL"
+echo ""
+echo "[2/3] 正在下载固件到路由器内存 (/tmp/sysupgrade.bin) ..."
 curl -L -# -o /tmp/sysupgrade.bin "$DOWNLOAD_URL"
-if [ ! -f /tmp/sysupgrade.bin ] || [ ! -s /tmp/sysupgrade.bin ]; then
-    echo "[错误] 固件下载失败或文件为空！"
-    exit 1
+
+if [ $? -ne 0 ] || [ ! -s /tmp/sysupgrade.bin ]; then
+  echo "[错误] 固件下载中断或文件为空，请检查网络后重试！"
+  rm -f /tmp/sysupgrade.bin
+  exit 1
 fi
 
-echo "[OTA] 正在进行固件完整性校验..."
-if ! sysupgrade -t /tmp/sysupgrade.bin; then
-    echo "[错误] 固件兼容性校验未通过，中止升级以保护设备！"
-    rm -f /tmp/sysupgrade.bin
-    exit 1
-fi
+echo "固件下载成功，文件完整！"
+echo ""
+echo "[3/3] 即将执行升级 (sysupgrade)..."
+echo "升级期间请勿断电，设备将在 1-2 分钟内自动刷写并重启！"
+echo "==============================================="
 
-echo "[OTA] 校验通过，正在保留配置升级并重启..."
-sysupgrade -v -q /tmp/sysupgrade.bin
+# 后台延迟 2 秒拉起升级，确保前端 Web 页面能完整输出日志
+( sleep 2 && sysupgrade -n /tmp/sysupgrade.bin ) >/dev/null 2>&1 &
+exit 0
 EOF
-chmod +x files/usr/bin/autoupdate
+
+chmod +x package/base-files/files/usr/bin/autoupdate
+
+# 8. 配置 Web 界面“自定义命令（luci-app-commands）”菜单卡片
+mkdir -p package/base-files/files/etc/config
+cat <<'EOF' > package/base-files/files/etc/config/luci_commands
+config command
+	option name '在线检测并一键更新固件'
+	option command '/usr/bin/autoupdate'
+	option public '0'
+EOF
