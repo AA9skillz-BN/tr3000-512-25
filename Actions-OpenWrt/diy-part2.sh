@@ -6,13 +6,13 @@ sed -i 's/OpenWrt/ImmortalWrt-TR3000/g' package/base-files/files/bin/config_gene
 
 # 2. 修复 25.x 下 mt76 编译失败问题 (更新 mt76 到最新兼容提交)
 sed -i 's/PKG_SOURCE_DATE:=.*/PKG_SOURCE_DATE:=2024-04-06/g' package/kernel/mt76/Makefile || true
-# 如果拉取源码，强制清理一次 mt76 保证无缓存冲突
+# 清理缓存标记，强制重新构建
 rm -rf package/kernel/mt76/.ver_*
 
-# 3. 注入开机自启初始化脚本
+# 3. 注入开机自启初始化脚本 (修正 Shebang 为 /bin/sh)
 mkdir -p files/etc/uci-defaults
 cat << 'EOF' > files/etc/uci-defaults/99-custom-settings
-#!/sh
+#!/bin/sh
 
 # 配置中兴 F50 (MODEM) 即插即用接口
 uci -q delete network.MODEM
@@ -49,10 +49,10 @@ exit 0
 EOF
 chmod +x files/etc/uci-defaults/99-custom-settings
 
-# 4. 注入固件在线更新脚本
+# 4. 注入固件在线更新脚本 (修正 Shebang 为 /bin/sh)
 mkdir -p files/usr/bin
 cat << 'EOF' > files/usr/bin/autoupdate
-#!/sh
+#!/bin/sh
 
 REPO="AA9skillz-BN/tr3000-512-25"
 echo "[OTA] 正在检测 GitHub 最新固件..."
