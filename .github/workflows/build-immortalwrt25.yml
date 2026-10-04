@@ -3,18 +3,23 @@ name: Build ImmortalWrt 25.x for Cudy TR3000 (512MB)
 on:
   repository_dispatch:
   workflow_dispatch:
+  schedule:
+    - cron: '0 19 * * 3'  # UTC 19:00 周三 = 北京时间 周四 03:00 定时自动运行
+
+permissions:
+  contents: write
 
 env:
   REPO_URL: https://github.com/immortalwrt/immortalwrt
   REPO_BRANCH: master
-  FEEDS_CONF: feeds.conf.default
   CONFIG_FILE: openwrt-mod/config/minimum.config
   DIY_P1_SH: Actions-OpenWrt/diy-part1.sh
   DIY_P2_SH: Actions-OpenWrt/diy-part2.sh
-  UPLOAD_BIN_DIR: false
   UPLOAD_FIRMWARE: true
   UPLOAD_RELEASE: true
   TZ: Asia/Shanghai
+  CCACHE_DIR: /home/runner/.ccache
+  CCACHE_MAXSIZE: 5G
 
 jobs:
   build:
@@ -24,30 +29,51 @@ jobs:
     - name: Checkout
       uses: actions/checkout@v4
 
+    # 1. 深度清理磁盘，释放 30GB+ NVMe 固态硬盘空间
+    - name: Free up disk space
+      uses: jlumbroso/free-disk-space@main
+      with:
+        tool-cache: false
+        android: true
+        dotnet: true
+        haskell: true
+        large-packages: true
+        docker-images: true
+        swap-storage: false
+
+    # 2. 初始化环境，配置 10G Swap 防止 OOM
     - name: Initialization environment
       env:
         DEBIAN_FRONTEND: noninteractive
       run: |
-        sudo rm -rf /etc/apt/sources.list.d/* /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
-        sudo docker image prune --all --force
         sudo -E apt-get -qq update
-        sudo -E apt-get -qq install ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential bzip2 ccache cmake cpio curl device-tree-compiler fastjar flex gawk gettext gcc-multilib g++-multilib git gperf haveged help2man intltool libc6-dev-i386 libelf-dev libfuse-dev libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev libpython3-dev libreadline-dev libssl-dev libtool lrzsz mkisofs msmtp nano ninja-build p7zip p7zip-full patch pkgconf python3 python3-pyelftools python3-setuptools qemu-utils rsync scons squashfs-tools subversion swig texinfo uglifyjs upx-ucl unzip vim wget xmlto xxd zlib1g-dev
-        sudo -E apt-get -qq autoremove --purge
-        sudo -E apt-get -qq clean
+        sudo -E apt-get -qq install -y ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential \
+        bzip2 ccache cmake cpio curl device-tree-compiler fastjar flex gawk gettext gcc-multilib g++-multilib \
+        git gperf haveged help2man intltool libc6-dev-i386 libelf-dev libfuse-dev libglib2.0-dev libgmp3-dev \
+        libltdl-dev libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev libpython3-dev libreadline-dev \
+        libssl-dev libtool lrzsz mkisofs msmtp nano ninja-build psmisc python3 python3-pyelftools python3-setuptools \
+        qemu-utils rsync scons squashfs-tools subversion swig texinfo uglifyjs upx-ucl unzip vim wget xmlto \
+        zlib1g-dev clang llvm lld jq
         sudo timedatectl set-timezone "$TZ"
-        sudo mkdir -p /workdir
-        sudo chown $USER:$GROUPS /workdir
 
+        sudo fallocate -l 10G /swapfile_ram
+        sudo chmod 600 /swapfile_ram
+        sudo mkswap /swapfile_ram
+        sudo swapon /swapfile_ram
+
+        sudo mkdir -p /workdir $CCACHE_DIR
+        sudo chown -R $USER:$GROUPS /workdir $CCACHE_DIR
+
+    # 3. 浅克隆源码
     - name: Clone source code
       working-directory: /workdir
       run: |
-        df -h
-        git clone $REPO_URL -b $REPO_BRANCH openwrt
+        git clone --depth 1 $REPO_URL -b $REPO_BRANCH openwrt
         ln -sf /workdir/openwrt $GITHUB_WORKSPACE/openwrt
 
+    # 4. 加载 feeds 并更新安装
     - name: Load custom feeds
       run: |
-        [ -e $FEEDS_CONF ] && cp $FEEDS_CONF openwrt/feeds.conf.default
         chmod +x $DIY_P1_SH
         cd openwrt
         $GITHUB_WORKSPACE/$DIY_P1_SH
@@ -58,11 +84,13 @@ jobs:
     - name: Install feeds
       run: cd openwrt && ./scripts/feeds install -a
 
+    # 4.1 注入 512MB 设备树与 Profile（覆盖官方定义，确保 100% 触发生成镜像）
     - name: Apply 512MB Device Tree & Profile
       run: |
-        cp openwrt-mod/mt7981b-cudy-tr3000-512mb-v1.dts openwrt/target/linux/mediatek/dts/
+        cp openwrt-mod/mt7981b-cudy-tr3000-512mb-v1.dts openwrt/target/linux/mediatek/dts/mt7981b-cudy-tr3000-v1.dts
         cat openwrt-mod/cudy-tr3000-512.mk >> openwrt/target/linux/mediatek/image/filogic.mk
 
+    # 5. 加载配置并注入编译优化参数
     - name: Load custom configuration
       run: |
         [ -e files ] && mv files openwrt/files
@@ -71,64 +99,116 @@ jobs:
         cd openwrt
         $GITHUB_WORKSPACE/$DIY_P2_SH
 
+        # 速度优化：关闭内核冗余调试符号
+        sed -i 's/CONFIG_COLLECT_KERNEL_DEBUG=y/CONFIG_COLLECT_KERNEL_DEBUG=n/' .config || true
+        echo "CONFIG_NO_STRIP=n" >> .config
+        echo "CONFIG_USE_STRIP=y" >> .config
+
+        make defconfig
+
+    # 6. 配置 ccache 编译缓存
+    - name: Cache ccache
+      uses: actions/cache@v4
+      with:
+        path: ${{ env.CCACHE_DIR }}
+        key: ${{ runner.os }}-openwrt-ccache-v5-${{ hashFiles('openwrt/.config') }}
+        restore-keys: |
+          ${{ runner.os }}-openwrt-ccache-v5-
+
+    # 7. 并发高速下载依赖包
     - name: Download package
       id: package
       run: |
         cd openwrt
-        make defconfig
-        make download -j8
-        find dl -size -1024c -exec ls -l {} \;
+        make download -j16
         find dl -size -1024c -exec rm -f {} \;
+        for file in dl/*.tar.* dl/*.tgz; do
+          if [ -f "$file" ]; then
+            tar -tf "$file" >/dev/null 2>&1 || {
+              echo "Removed damaged archive: $file"
+              rm -f "$file"
+            }
+          fi
+        done
 
+    # 8. 编译固件（多线程并发 + 安全返回值判定 + 错误定向提取）
     - name: Compile the firmware
       id: compile
       run: |
         cd openwrt
-        echo -e "$(nproc) thread compile"
-        make -j$(nproc) || make -j1 V=s
+        ccache -M $CCACHE_MAXSIZE
+        ccache -z
+
+        NPROC=$(nproc)
+        echo "Using $((NPROC + 1)) parallel threads..."
+
+        make -j$((NPROC + 1)) 2>&1 | tee /tmp/build.log
+        RET=${PIPESTATUS[0]}
+
+        if [ $RET -ne 0 ]; then
+            echo "=========================================="
+            echo "           COMPILATION FAILED             "
+            echo "=========================================="
+            echo ">>> 提取关键错误行："
+            grep -E "ERROR:|failed to build|Error [1-9]|fatal error:" /tmp/build.log | tail -n 30 || true
+            echo "=========================================="
+            echo ">>> 报错附近最后 50 行日志："
+            tail -n 50 /tmp/build.log
+            exit $RET
+        fi
+
+        echo "=== Ccache Hit Rate Statistics ==="
+        ccache -s
+
         echo "status=success" >> $GITHUB_OUTPUT
+        echo "FILE_DATE=_$(date +"%Y%m%d%H%M")" >> $GITHUB_ENV
 
-    - name: Check space usage
-      if: steps.compile.outputs.status == 'success' && !cancelled()
-      run: df -hT
-
-    - name: Upload bin directory
+    # 8.1 失败自动打包日志
+    - name: Upload error log on failure
       uses: actions/upload-artifact@v4
-      if: steps.compile.outputs.status == 'success' && env.UPLOAD_BIN_DIR == 'true'
+      if: failure()
       with:
-        name: OpenWrt_bin${{ env.DEVICE_NAME }}${{ env.FILE_DATE }}
-        path: openwrt/bin
+        name: compilation-failure-log
+        path: /tmp/build.log
 
+    # 9. 整理输出文件
     - name: Organize files
       id: organize
-      if: steps.compile.outputs.status == 'success' && env.UPLOAD_FIRMWARE == 'true' && !cancelled()
+      if: env.UPLOAD_FIRMWARE == 'true' && steps.compile.outputs.status == 'success' && !cancelled()
       run: |
         cd openwrt/bin/targets/*/*
         rm -rf packages
         echo "FIRMWARE=$PWD" >> $GITHUB_ENV
         echo "status=success" >> $GITHUB_OUTPUT
 
+    # 10. 上传固件至 Artifacts
     - name: Upload firmware directory
       uses: actions/upload-artifact@v4
       if: steps.organize.outputs.status == 'success' && !cancelled()
       with:
-        name: OpenWrt_firmware${{ env.DEVICE_NAME }}${{ env.FILE_DATE }}
+        name: OpenWrt_firmware_Cudy_TR3000${{ env.FILE_DATE }}
         path: ${{ env.FIRMWARE }}
 
+    # 11. 自动发布固件至 GitHub Releases
     - name: Generate release tag
       id: tag
-      if: steps.organize.outputs.status == 'success' && env.UPLOAD_RELEASE == 'true' && !cancelled()
+      if: env.UPLOAD_RELEASE == 'true' && steps.compile.outputs.status == 'success' && !cancelled()
       run: |
         echo "release_tag=$(date +"%Y.%m.%d-%H%M")" >> $GITHUB_OUTPUT
         touch release.txt
+        echo "ImmortalWrt 25.x for Cudy TR3000 (512MB Flash Mod)" >> release.txt
         echo "status=success" >> $GITHUB_OUTPUT
 
     - name: Upload firmware to release
       uses: softprops/action-gh-release@v2
-      if: steps.tag.outputs.status == 'success' && !cancelled()
+      if: steps.tag.outputs.release_tag != '' && !cancelled()
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
         tag_name: ${{ steps.tag.outputs.release_tag }}
         body_path: release.txt
-        files: ${{ env.FIRMWARE }}/*
+        files: |
+          ${{ env.FIRMWARE }}/*.bin
+          ${{ env.FIRMWARE }}/*.buildinfo
+          ${{ env.FIRMWARE }}/*.manifest
+          ${{ env.FIRMWARE }}/*sha256sums
