@@ -158,7 +158,7 @@ echo "==============================================="
 echo "[1/3] 正在查询 GitHub 最新构建版本..."
 
 DOWNLOAD_URL=$(curl -sL "https://api.github.com/repos/${GITHUB_REPO}/releases/latest" | \
-  jq -r '.assets[] | select(.name | test("cudy.*tr3000.*sysupgrade\\.bin$")) | .browser_download_url' | head -n 1)
+  jq -r '.assets[] | select(.name | test("cudy.*tr3000.*sysupgrade\\.bin")) | .browser_download_url' | head -n 1)
 
 if [ -z "$DOWNLOAD_URL" ] || [ "$DOWNLOAD_URL" = "null" ]; then
   echo "[错误] 未能检测到匹配 cudy_tr3000 的最新 sysupgrade.bin 固件！"
