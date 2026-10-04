@@ -16,14 +16,7 @@ rm -rf package/libs/libubox/patches
 # 2. 将默认后台管理 IP 修改为 192.168.6.1
 sed -i 's/192.168.1.1/192.168.6.1/g' package/base-files/files/bin/config_generate
 
-# 3. 扩容 Cudy TR3000 UBI 分区以完全吃满 512MB SPI-NAND 物理闪存
-find target/linux/mediatek/ -type f \( -name "*cudy*tr3000*.dts*" -o -name "*cudy*tr3000*.dtsi*" \) | while read -r f; do
-    echo "Applying 512MB Flash patch to $f"
-    sed -i 's/0x4000000/0x1fa00000/g' "$f"
-    sed -i 's/0x04000000/0x1fa00000/g' "$f"
-done
-
-# 4. 强制指定目标平台与 Cudy TR3000 512MB 机型（统一保持 512mb 标识）
+# 3. 强制指定目标平台与 Cudy TR3000 512MB 机型（统一保持 512mb 标识，防止冲撞）
 cat >> .config <<EOF
 CONFIG_TARGET_mediatek=y
 CONFIG_TARGET_mediatek_filogic=y
@@ -31,7 +24,7 @@ CONFIG_TARGET_mediatek_filogic_DEVICE_cudy_tr3000-512mb=y
 CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_cudy_tr3000-512mb=y
 EOF
 
-# 5. 注入中兴 F50 5G 随身 WiFi 的全套驱动与依赖环境
+# 4. 注入中兴 F50 5G 随身 WiFi 的全套驱动与依赖环境
 cat >> .config <<EOF
 # USB 基础子系统与 USB3.0 控制器驱动
 CONFIG_PACKAGE_kmod-usb-core=y
@@ -58,7 +51,7 @@ CONFIG_PACKAGE_jq=y
 CONFIG_PACKAGE_luci-app-commands=y
 EOF
 
-# 6. 注入开机自启预设 (双频 Wi-Fi 160MHz 满血 + F50 eth2 自动拨号)
+# 5. 注入开机自启预设 (双频 Wi-Fi 160MHz 满血 + F50 eth2 自动拨号)
 mkdir -p package/base-files/files/etc/uci-defaults
 cat << 'EOF' > package/base-files/files/etc/uci-defaults/99-custom-settings
 #!/bin/sh
@@ -142,10 +135,10 @@ exit 0
 EOF
 chmod +x package/base-files/files/etc/uci-defaults/99-custom-settings
 
-# 7. 植入固件在线一键更新核心脚本（绑定 AA9skillz-BN/tr3000-512-25）
+# 6. 植入固件在线一键更新核心脚本（绑定 AA9skillz-BN/tr3000-512-25）
 mkdir -p package/base-files/files/usr/bin
 cat <<'EOF' > package/base-files/files/usr/bin/autoupdate
-#!/bin/sh
+#!/sh
 # 路由器一键拉取 GitHub 最新 Release 并自动升级
 
 GITHUB_REPO="AA9skillz-BN/tr3000-512-25"
@@ -178,7 +171,7 @@ fi
 
 echo "固件下载成功，文件完整！"
 echo ""
-echo "[3/3] 即将执行升级 (sysupgrade)..."
+echo "[3/3] 即将执行升级 (sysupgrade -n)..."
 echo "升级期间请勿断电，设备将在 1-2 分钟内自动刷写并重启！"
 echo "==============================================="
 
@@ -189,7 +182,7 @@ EOF
 
 chmod +x package/base-files/files/usr/bin/autoupdate
 
-# 8. 配置 Web 界面“自定义命令（luci-app-commands）”菜单卡片
+# 7. 配置 Web 界面“自定义命令（luci-app-commands）”菜单卡片
 mkdir -p package/base-files/files/etc/config
 cat <<'EOF' > package/base-files/files/etc/config/luci_commands
 config command
