@@ -13,6 +13,9 @@
 # 1. 清理 libubox 快照补丁冲突
 rm -rf package/libs/libubox/patches
 
+# 1.1 清理无线驱动中间状态，避免多线程依赖缺失
+rm -rf package/kernel/mt76/.ver_* package/kernel/mac80211/.ver_*
+
 # 2. 将默认后台管理 IP 修改为 192.168.6.1
 sed -i 's/192.168.1.1/192.168.6.1/g' package/base-files/files/bin/config_generate
 
