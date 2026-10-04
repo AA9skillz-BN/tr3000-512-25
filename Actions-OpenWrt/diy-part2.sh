@@ -4,12 +4,10 @@
 # 1. 修正默认主机名
 sed -i 's/OpenWrt/ImmortalWrt-TR3000/g' package/base-files/files/bin/config_generate
 
-# 2. 修复 25.x 下 mt76 编译失败问题 (更新 mt76 到最新兼容提交)
-sed -i 's/PKG_SOURCE_DATE:=.*/PKG_SOURCE_DATE:=2024-04-06/g' package/kernel/mt76/Makefile || true
-# 清理缓存标记，强制重新构建
+# 2. 清理 mt76 编译中间缓存，防止脏版本冲突
 rm -rf package/kernel/mt76/.ver_*
 
-# 3. 注入开机自启初始化脚本 (修正 Shebang 为 /bin/sh)
+# 3. 注入开机自启初始化脚本
 mkdir -p files/etc/uci-defaults
 cat << 'EOF' > files/etc/uci-defaults/99-custom-settings
 #!/bin/sh
@@ -49,7 +47,7 @@ exit 0
 EOF
 chmod +x files/etc/uci-defaults/99-custom-settings
 
-# 4. 注入固件在线更新脚本 (修正 Shebang 为 /bin/sh)
+# 4. 注入固件在线更新脚本
 mkdir -p files/usr/bin
 cat << 'EOF' > files/usr/bin/autoupdate
 #!/bin/sh
