@@ -19,50 +19,7 @@ rm -rf package/kernel/mt76/.ver_* package/kernel/mac80211/.ver_*
 # 2. 将默认后台管理 IP 修改为 192.168.6.1
 sed -i 's/192.168.1.1/192.168.6.1/g' package/base-files/files/bin/config_generate
 
-# 3. 扩容 Cudy TR3000 UBI 分区以完全吃满 512MB SPI-NAND 物理闪存 (保留 32MB 安全冗余防坏块)
-find target/linux/mediatek/ -type f \( -name "*cudy*tr3000*.dts*" -o -name "*cudy*tr3000*.dtsi*" \) | while read -r f; do
-    echo "Applying 512MB Flash patch to $f"
-    sed -i 's/0x4000000/0x1da40000/g' "$f"
-    sed -i 's/0x04000000/0x1da40000/g' "$f"
-    sed -i 's/0x1fa00000/0x1da40000/g' "$f"
-done
-
-# 4. 强制指定目标平台与官方 Cudy TR3000 v1 机型（确保 100% 触发生成镜像）
-cat >> .config <<EOF
-CONFIG_TARGET_mediatek=y
-CONFIG_TARGET_mediatek_filogic=y
-CONFIG_TARGET_mediatek_filogic_DEVICE_cudy_tr3000-v1=y
-CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_cudy_tr3000-v1=y
-EOF
-
-# 5. 注入中兴 F50 5G 随身 WiFi 的全套驱动与依赖环境
-cat >> .config <<EOF
-# USB 基础子系统与 USB3.0 控制器驱动
-CONFIG_PACKAGE_kmod-usb-core=y
-CONFIG_PACKAGE_kmod-usb3=y
-
-# F50 虚拟以太网驱动协议（全覆盖：CDC-Ether / CDC-NCM / RNDIS）
-CONFIG_PACKAGE_kmod-usb-net=y
-CONFIG_PACKAGE_kmod-usb-net-cdc-ether=y
-CONFIG_PACKAGE_kmod-usb-net-cdc-ncm=y
-CONFIG_PACKAGE_kmod-usb-net-rndis=y
-
-# 串口与模式切换支持（防虚拟光驱锁死，支持后台 AT 调试）
-CONFIG_PACKAGE_kmod-usb-serial=y
-CONFIG_PACKAGE_kmod-usb-serial-option=y
-CONFIG_PACKAGE_kmod-usb-serial-wwan=y
-CONFIG_PACKAGE_usb-modeswitch=y
-CONFIG_PACKAGE_usbutils=y
-CONFIG_PACKAGE_kmod-nls-base=y
-CONFIG_PACKAGE_kmod-nls-utf8=y
-
-# 自动化脚本与 Web 界面依赖
-CONFIG_PACKAGE_curl=y
-CONFIG_PACKAGE_jq=y
-CONFIG_PACKAGE_luci-app-commands=y
-EOF
-
-# 6. 注入开机自启预设 (双频 Wi-Fi 160MHz 满血 + F50 eth2 自动拨号)
+# 3. 注入开机自启预设 (双频 Wi-Fi 160MHz 满血 + F50 eth2 自动拨号)
 mkdir -p package/base-files/files/etc/uci-defaults
 cat << 'EOF' > package/base-files/files/etc/uci-defaults/99-custom-settings
 #!/bin/sh
@@ -90,7 +47,7 @@ uci set wireless.default_radio0.network='lan'
 uci set wireless.default_radio0.mode='ap'
 uci set wireless.default_radio0.ssid='ImmortalWrt_2.4G'
 uci set wireless.default_radio0.encryption='psk2'
-uci set wireless.default_radio0.key='q19980720ZJX#'
+uci set wireless.default_radio0.key='password'
 uci set wireless.default_radio0.disabled='0'
 
 uci -q delete wireless.radio1
@@ -111,7 +68,7 @@ uci set wireless.default_radio1.network='lan'
 uci set wireless.default_radio1.mode='ap'
 uci set wireless.default_radio1.ssid='ImmortalWrt_5G'
 uci set wireless.default_radio1.encryption='psk2'
-uci set wireless.default_radio1.key='q19980720ZJX#'
+uci set wireless.default_radio1.key='password'
 uci set wireless.default_radio1.disabled='0'
 uci commit wireless
 
@@ -146,13 +103,15 @@ exit 0
 EOF
 chmod +x package/base-files/files/etc/uci-defaults/99-custom-settings
 
-# 7. 植入固件在线一键更新核心脚本（绑定 AA9skillz-BN/tr3000-512-25）
+# 4. 植入固件在线一键更新核心脚本（绑定 AA9skillz-BN/tr3000-512-25）
 mkdir -p package/base-files/files/usr/bin
 cat <<'EOF' > package/base-files/files/usr/bin/autoupdate
 #!/bin/sh
 # 路由器一键拉取 GitHub 最新 Release 并自动升级
 
 GITHUB_REPO="AA9skillz-BN/tr3000-512-25"
+# 使用国内镜像加速下载，防止下载超时或中断
+PROXY_URL="https://mirror.ghproxy.com/"
 
 echo "==============================================="
 echo "  ImmortalWrt 25.x 自动升级程序"
@@ -160,7 +119,7 @@ echo "  目标机型: Cudy TR3000 (512MB Flash)"
 echo "==============================================="
 echo "[1/3] 正在查询 GitHub 最新构建版本..."
 
-DOWNLOAD_URL=$(curl -sL "https://api.github.com/repos/${GITHUB_REPO}/releases/latest" | \
+DOWNLOAD_URL=$(curl --connect-timeout 10 -sL "https://api.github.com/repos/${GITHUB_REPO}/releases/latest" | \
   jq -r '.assets[] | select(.name | test("cudy.*tr3000.*sysupgrade\\.bin")) | .browser_download_url' | head -n 1)
 
 if [ -z "$DOWNLOAD_URL" ] || [ "$DOWNLOAD_URL" = "null" ]; then
@@ -169,10 +128,10 @@ if [ -z "$DOWNLOAD_URL" ] || [ "$DOWNLOAD_URL" = "null" ]; then
 fi
 
 echo "发现最新固件下载地址:"
-echo "-> $DOWNLOAD_URL"
+echo "-> ${PROXY_URL}${DOWNLOAD_URL}"
 echo ""
 echo "[2/3] 正在下载固件到路由器内存 (/tmp/sysupgrade.bin) ..."
-curl -L -# -o /tmp/sysupgrade.bin "$DOWNLOAD_URL"
+curl --connect-timeout 15 -L -# -o /tmp/sysupgrade.bin "${PROXY_URL}${DOWNLOAD_URL}"
 
 if [ $? -ne 0 ] || [ ! -s /tmp/sysupgrade.bin ]; then
   echo "[错误] 固件下载中断或文件为空，请检查网络后重试！"
@@ -186,14 +145,14 @@ echo "[3/3] 即将执行升级 (sysupgrade)..."
 echo "升级期间请勿断电，设备将在 1-2 分钟内自动刷写并重启！"
 echo "==============================================="
 
-# 后台延迟 2 秒拉起升级，确保前端 Web 页面能完整输出日志
-( sleep 2 && sysupgrade -n /tmp/sysupgrade.bin ) >/dev/null 2>&1 &
+# 去除 -n 参数，保留当前路由器配置进行平滑升级
+( sleep 2 && sysupgrade /tmp/sysupgrade.bin ) >/dev/null 2>&1 &
 exit 0
 EOF
 
 chmod +x package/base-files/files/usr/bin/autoupdate
 
-# 8. 配置 Web 界面“自定义命令（luci-app-commands）”菜单卡片
+# 5. 配置 Web 界面“自定义命令（luci-app-commands）”菜单卡片
 mkdir -p package/base-files/files/etc/config
 cat <<'EOF' > package/base-files/files/etc/config/luci_commands
 config command
