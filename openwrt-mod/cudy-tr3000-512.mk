@@ -12,6 +12,6 @@ define Device/cudy_tr3000-v1
   IMAGES += factory.bin
   IMAGE/factory.bin := append-kernel | pad-to $$(BLOCKSIZE) | append-ubi | check-size
   IMAGE/sysupgrade.bin := sysupgrade-tar | append-metadata
-  $(Device/mediatek_filogic)
+  $(call Device/mediatek_filogic)
 endef
 TARGET_DEVICES += cudy_tr3000-v1
