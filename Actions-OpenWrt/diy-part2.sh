@@ -5,24 +5,25 @@
 sed -i 's/192.168.1.1/192.168.6.1/g' package/base-files/files/bin/config_generate || true
 
 # 2. 复制 512MB 专属设备树 (DTS) 到内核 dts 目录
-DTS_SRC="$GITHUB_WORKSPACE/openwrt-mod/mt7981b-cudy-tr3000-512m.dts"
+DTS_SRC="$GITHUB_WORKSPACE/openwrt-mod/mt7981b-cudy-tr3000-512mb-v1.dts"
 if [ -f "$DTS_SRC" ]; then
     mkdir -p target/linux/mediatek/dts || true
     cp -f "$DTS_SRC" target/linux/mediatek/dts/ || true
 fi
 
-# 3. 注入 512M 机型定义 (使用防御性检测，防止 grep 触发 set -e 退出)
+# 3. 精准注入对齐原参考仓库的机型定义 (防御性判断防止 set -e 退出)
 FILOGIC_MK="target/linux/mediatek/image/filogic.mk"
 if [ -f "$FILOGIC_MK" ]; then
-    HAS_DEV=$(grep -c "cudy_tr3000-512m" "$FILOGIC_MK" || true)
+    HAS_DEV=$(grep -c "cudy_tr3000-512mb-v1" "$FILOGIC_MK" || true)
     if [ "$HAS_DEV" -eq 0 ]; then
-        echo "Injecting cudy_tr3000-512m definition into $FILOGIC_MK"
+        echo "Injecting cudy_tr3000-512mb-v1 definition into $FILOGIC_MK"
         cat << 'EOF' >> "$FILOGIC_MK"
 
-define Device/cudy_tr3000-512m
+define Device/cudy_tr3000-512mb-v1
   DEVICE_VENDOR := Cudy
-  DEVICE_MODEL := TR3000 (512MB Mod)
-  DEVICE_DTS := mt7981b-cudy-tr3000-512m
+  DEVICE_MODEL := TR3000
+  DEVICE_VARIANT := 512mb v1
+  DEVICE_DTS := mt7981b-cudy-tr3000-512mb-v1
   DEVICE_DTS_DIR := ../dts
   SUPPORTED_DEVICES += R47 cudy,tr3000-v1
   UBINIZE_OPTS := -E 5
@@ -33,7 +34,7 @@ define Device/cudy_tr3000-512m
   IMAGE/sysupgrade.bin := sysupgrade-tar | append-metadata
   DEVICE_PACKAGES := kmod-usb3 kmod-mt7981-firmware mt7981-wo-firmware
 endef
-TARGET_DEVICES += cudy_tr3000-512m
+TARGET_DEVICES += cudy_tr3000-512mb-v1
 EOF
     fi
 fi
@@ -60,7 +61,7 @@ echo "=========================================="
 API_URL="https://api.github.com/repos/$REPO/releases/latest"
 RELEASE_JSON=$(curl -sL "$API_URL")
 
-DOWNLOAD_URL=$(echo "$RELEASE_JSON" | grep -o 'https://[^" ]*cudy_tr3000-512m[^" ]*sysupgrade\.bin' | head -n 1)
+DOWNLOAD_URL=$(echo "$RELEASE_JSON" | grep -o 'https://[^" ]*cudy_tr3000-512mb-v1[^" ]*sysupgrade\.bin' | head -n 1)
 if [ -z "$DOWNLOAD_URL" ]; then
     DOWNLOAD_URL=$(echo "$RELEASE_JSON" | grep -o 'https://[^" ]*sysupgrade\.bin' | head -n 1)
 fi
