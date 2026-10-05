@@ -4,35 +4,25 @@
 # 1. 修改默认管理后台 IP 为 192.168.6.1
 sed -i 's/192.168.1.1/192.168.6.1/g' package/base-files/files/bin/config_generate || true
 
-# 2. 复制 512MB 专属设备树 (DTS)
+# 2. 复制 512MB 专属设备树 (DTS) 到内核 dts 目录
 DTS_SRC="$GITHUB_WORKSPACE/openwrt-mod/mt7981b-cudy-tr3000-512m.dts"
 if [ -f "$DTS_SRC" ]; then
     mkdir -p target/linux/mediatek/dts
     cp -f "$DTS_SRC" target/linux/mediatek/dts/
 fi
 
-# 3. 单点精准注入机型定义 (找到第一个生效的 mk 文件注入后立即退出，绝不重复写入)
-TARGET_MK=""
-if [ -f "target/linux/mediatek/image/filogic.mk" ]; then
-    TARGET_MK="target/linux/mediatek/image/filogic.mk"
-elif [ -f "target/linux/mediatek/image/mt7981.mk" ]; then
-    TARGET_MK="target/linux/mediatek/image/mt7981.mk"
-elif [ -f "target/linux/mediatek/image/Makefile" ]; then
-    TARGET_MK="target/linux/mediatek/image/Makefile"
-fi
-
-if [ -n "$TARGET_MK" ]; then
-    if ! grep -q "cudy_tr3000-512m" "$TARGET_MK"; then
-        echo "Injecting cudy_tr3000-512m definition into $TARGET_MK"
-        cat << 'EOF' >> "$TARGET_MK"
+# 3. 精准向 filogic.mk 注入 512M 机型定义 (单点单次注入，继承官方成熟配置)
+FILOGIC_MK="target/linux/mediatek/image/filogic.mk"
+if [ -f "$FILOGIC_MK" ]; then
+    if ! grep -q "cudy_tr3000-512m" "$FILOGIC_MK"; then
+        echo "Injecting cudy_tr3000-512m definition into $FILOGIC_MK"
+        cat << 'EOF' >> "$FILOGIC_MK"
 
 define Device/cudy_tr3000-512m
-  DEVICE_VENDOR := Cudy
+  $(Device/cudy_tr3000-v1)
   DEVICE_MODEL := TR3000 (512MB Mod)
   DEVICE_DTS := mt7981b-cudy-tr3000-512m
-  DEVICE_PACKAGES := kmod-mt7981-firmware mt7981-wo-firmware
   IMAGE_SIZE := 490M
-  $(call Device/FitImage)
 endef
 TARGET_DEVICES += cudy_tr3000-512m
 EOF
