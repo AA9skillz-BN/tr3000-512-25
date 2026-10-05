@@ -7,14 +7,15 @@ sed -i 's/192.168.1.1/192.168.6.1/g' package/base-files/files/bin/config_generat
 # 2. 复制 512MB 专属设备树 (DTS) 到内核 dts 目录
 DTS_SRC="$GITHUB_WORKSPACE/openwrt-mod/mt7981b-cudy-tr3000-512m.dts"
 if [ -f "$DTS_SRC" ]; then
-    mkdir -p target/linux/mediatek/dts
-    cp -f "$DTS_SRC" target/linux/mediatek/dts/
+    mkdir -p target/linux/mediatek/dts || true
+    cp -f "$DTS_SRC" target/linux/mediatek/dts/ || true
 fi
 
-# 3. 精准单点向 filogic.mk 注入 512M 机型定义 (显式防止 grep 返回非 0 退出码)
+# 3. 注入 512M 机型定义 (使用防御性检测，防止 grep 触发 set -e 退出)
 FILOGIC_MK="target/linux/mediatek/image/filogic.mk"
 if [ -f "$FILOGIC_MK" ]; then
-    if ! grep -qs "cudy_tr3000-512m" "$FILOGIC_MK"; then
+    HAS_DEV=$(grep -c "cudy_tr3000-512m" "$FILOGIC_MK" || true)
+    if [ "$HAS_DEV" -eq 0 ]; then
         echo "Injecting cudy_tr3000-512m definition into $FILOGIC_MK"
         cat << 'EOF' >> "$FILOGIC_MK"
 
@@ -42,7 +43,7 @@ fi
 # =========================================================
 
 # A. 升级脚本
-mkdir -p package/base-files/files/usr/bin
+mkdir -p package/base-files/files/usr/bin || true
 cat << 'EOF' > package/base-files/files/usr/bin/auto-update-firmware.sh
 #!/bin/sh
 
@@ -81,13 +82,13 @@ rm -f "$TMP_FILE"
 echo "正在下载固件至内存缓存区 (请勿断电)..."
 curl -L -k -o "$TMP_FILE" "$DOWNLOAD_URL"
 
-if [ $? -ne 0 ] \vert{}\vert{} [ ! -s "$TMP_FILE" ]; then
+if [ $? -ne 0 ] || [ ! -s "$TMP_FILE" ]; then
     echo "❌ 固件下载失败，请检查路由器网络连接！"
     rm -f "$TMP_FILE"
     exit 1
 fi
 
-echo "✔ 固件下载完成，大小: $(ls -lh$TMP_FILE | awk '{print $5}')"
+echo "✔ 固件下载完成，大小: $(ls -lh $TMP_FILE | awk '{print $5}')"
 echo ""
 
 echo "正在执行固件安全校验..."
@@ -107,7 +108,7 @@ EOF
 chmod +x package/base-files/files/usr/bin/auto-update-firmware.sh || true
 
 # B. 注册独立顶级菜单
-mkdir -p package/base-files/files/usr/share/luci/menu.d
+mkdir -p package/base-files/files/usr/share/luci/menu.d || true
 cat << 'EOF' > package/base-files/files/usr/share/luci/menu.d/luci-app-autoupdate.json
 {
 	"admin/autoupdate": {
@@ -122,7 +123,7 @@ cat << 'EOF' > package/base-files/files/usr/share/luci/menu.d/luci-app-autoupdat
 EOF
 
 # C. 权限控制 ACL
-mkdir -p package/base-files/files/usr/share/rpcd/acl.d
+mkdir -p package/base-files/files/usr/share/rpcd/acl.d || true
 cat << 'EOF' > package/base-files/files/usr/share/rpcd/acl.d/luci-app-autoupdate.json
 {
 	"luci-app-autoupdate": {
@@ -142,7 +143,7 @@ cat << 'EOF' > package/base-files/files/usr/share/rpcd/acl.d/luci-app-autoupdate
 EOF
 
 # D. 交互前端 View
-mkdir -p package/base-files/files/www/luci-static/resources/view/autoupdate
+mkdir -p package/base-files/files/www/luci-static/resources/view/autoupdate || true
 cat << 'EOF' > package/base-files/files/www/luci-static/resources/view/autoupdate/index.js
 'use strict';
 'require view';
@@ -191,3 +192,38 @@ return view.extend({
 								setTimeout(function() { ui.hideModal(); }, 2500);
 
 								fs.exec('/usr/bin/auto-update-firmware.sh').then(function() {
+									ev.target.disabled = false;
+								});
+
+								var poll = window.setInterval(function() {
+									fs.read_direct('/tmp/firmware_update.log').then(function(res) {
+										var logArea = document.getElementById('update_log_area');
+										if (logArea && res) {
+											logArea.value = res;
+											logArea.scrollTop = logArea.scrollHeight;
+										}
+									});
+								}, 1500);
+							}
+						}, _('⚡ 立即检查并拉取最新固件升级'))
+					]),
+					E('textarea', {
+						'id': 'update_log_area',
+						'class': 'cbi-input-textarea',
+						'style': 'width: 100%; height: 240px; font-family: monospace; background: #181818; color: #00ff66; padding: 10px; border-radius: 6px; border: 1px solid #333;',
+						'readonly': 'readonly'
+					}, logText)
+				])
+			])
+		]);
+
+		return viewDOM;
+	},
+
+	handleSaveApply: null,
+	handleSave: null,
+	handleReset: null
+});
+EOF
+
+exit 0
