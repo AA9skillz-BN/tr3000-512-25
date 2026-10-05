@@ -95,6 +95,11 @@ jobs:
       run: |
         cd openwrt
         echo -e "$(nproc) thread compile"
+        
+        # 1. 优先预编译 mac80211 核心依赖，提前生成 autoconf.h，消除 mt76 并发构建时序冲突
+        make package/kernel/mac80211/compile -j$(nproc) || make package/kernel/mac80211/compile -j1 V=s
+        
+        # 2. 全量并发编译固件
         make -j$(nproc) || make -j1 || make -j1 V=s
         echo "status=success" >> $GITHUB_OUTPUT
         echo "DEVICE_NAME=_cudy_tr3000-512mb-v1" >> $GITHUB_ENV
