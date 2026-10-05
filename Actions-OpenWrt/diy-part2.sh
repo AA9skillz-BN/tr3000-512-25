@@ -2,7 +2,7 @@
 # Description: OpenWrt DIY script part 2 (After Update feeds)
 
 # 1. 修改默认管理后台 IP 为 192.168.6.1
-sed -i 's/192.168.1.1/192.168.6.1/g' package/base-files/files/bin/config_generate
+sed -i 's/192.168.1.1/192.168.6.1/g' package/base-files/files/bin/config_generate || true
 
 # 2. 复制 512MB 专属设备树 (DTS)
 DTS_SRC="$GITHUB_WORKSPACE/openwrt-mod/mt7981b-cudy-tr3000-512m.dts"
@@ -11,12 +11,20 @@ if [ -f "$DTS_SRC" ]; then
     cp -f "$DTS_SRC" target/linux/mediatek/dts/
 fi
 
-# 3. 遍历注入 512M 机型定义到目标 Makefile 中 (兼容 25.x 的 filogic.mk 与 mt7981.mk)
-for mk_target in "target/linux/mediatek/image/filogic.mk" "target/linux/mediatek/image/mt7981.mk" "target/linux/mediatek/image/Makefile"; do
-    if [ -f "$mk_target" ]; then
-        if ! grep -q "cudy_tr3000-512m" "$mk_target"; then
-            echo "Injecting cudy_tr3000-512m definition into $mk_target"
-            cat << 'EOF' >> "$mk_target"
+# 3. 单点精准注入机型定义 (找到第一个生效的 mk 文件注入后立即退出，绝不重复写入)
+TARGET_MK=""
+if [ -f "target/linux/mediatek/image/filogic.mk" ]; then
+    TARGET_MK="target/linux/mediatek/image/filogic.mk"
+elif [ -f "target/linux/mediatek/image/mt7981.mk" ]; then
+    TARGET_MK="target/linux/mediatek/image/mt7981.mk"
+elif [ -f "target/linux/mediatek/image/Makefile" ]; then
+    TARGET_MK="target/linux/mediatek/image/Makefile"
+fi
+
+if [ -n "$TARGET_MK" ]; then
+    if ! grep -q "cudy_tr3000-512m" "$TARGET_MK"; then
+        echo "Injecting cudy_tr3000-512m definition into $TARGET_MK"
+        cat << 'EOF' >> "$TARGET_MK"
 
 define Device/cudy_tr3000-512m
   DEVICE_VENDOR := Cudy
@@ -28,15 +36,14 @@ define Device/cudy_tr3000-512m
 endef
 TARGET_DEVICES += cudy_tr3000-512m
 EOF
-        fi
     fi
-done
+fi
 
 # =========================================================
 # 4. 注入【固件升级】独立顶级菜单与在线升级脚本
 # =========================================================
 
-# 核心在线升级脚本
+# A. 升级脚本
 mkdir -p package/base-files/files/usr/bin
 cat << 'EOF' > package/base-files/files/usr/bin/auto-update-firmware.sh
 #!/bin/sh
@@ -101,7 +108,7 @@ sysupgrade "$TMP_FILE"
 EOF
 chmod +x package/base-files/files/usr/bin/auto-update-firmware.sh
 
-# 注册独立顶级菜单
+# B. 注册独立顶级菜单
 mkdir -p package/base-files/files/usr/share/luci/menu.d
 cat << 'EOF' > package/base-files/files/usr/share/luci/menu.d/luci-app-autoupdate.json
 {
@@ -116,7 +123,7 @@ cat << 'EOF' > package/base-files/files/usr/share/luci/menu.d/luci-app-autoupdat
 }
 EOF
 
-# 权限控制 ACL
+# C. 权限控制 ACL
 mkdir -p package/base-files/files/usr/share/rpcd/acl.d
 cat << 'EOF' > package/base-files/files/usr/share/rpcd/acl.d/luci-app-autoupdate.json
 {
@@ -136,7 +143,7 @@ cat << 'EOF' > package/base-files/files/usr/share/rpcd/acl.d/luci-app-autoupdate
 }
 EOF
 
-# 现代交互 UI
+# D. 交互前端 View
 mkdir -p package/base-files/files/www/luci-static/resources/view/autoupdate
 cat << 'EOF' > package/base-files/files/www/luci-static/resources/view/autoupdate/index.js
 'use strict';
@@ -219,3 +226,5 @@ return view.extend({
 	handleReset: null
 });
 EOF
+
+exit 0
