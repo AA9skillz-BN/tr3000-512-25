@@ -5,7 +5,7 @@
 
 / {
 	model = "Cudy TR3000 (512MB Flash)";
-	compatible = "cudy,tr3000-512m", "cudy,tr3000", "mediatek,mt7981";
+	compatible = "cudy,tr3000-512mb-v1", "cudy,tr3000-512m", "cudy,tr3000", "mediatek,mt7981";
 };
 
 &spi0 {
