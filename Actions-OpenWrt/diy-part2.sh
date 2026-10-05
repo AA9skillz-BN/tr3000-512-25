@@ -1,27 +1,29 @@
 #!/bin/bash
 # Description: OpenWrt DIY script part 2 (After Update feeds)
 
-# 1. 修改默认后台 IP 为 192.168.6.1
+# 1. 修改默认管理后台 IP 为 192.168.6.1
 sed -i 's/192.168.1.1/192.168.6.1/g' package/base-files/files/bin/config_generate
 
-# 2. 复制 512MB 专属设备树 (DTS) 到内核源码目录
-if [ -f "$GITHUB_WORKSPACE/openwrt-mod/mt7981b-cudy-tr3000-512m.dts" ]; then
-    cp -f "$GITHUB_WORKSPACE/openwrt-mod/mt7981b-cudy-tr3000-512m.dts" target/linux/mediatek/dts/
+# 2. 复制 512MB 专属设备树 (DTS)
+DTS_SRC="$GITHUB_WORKSPACE/openwrt-mod/mt7981b-cudy-tr3000-512m.dts"
+if [ -f "$DTS_SRC" ]; then
+    mkdir -p target/linux/mediatek/dts
+    cp -f "$DTS_SRC" target/linux/mediatek/dts/
 fi
 
-# 3. 寻找目标 Makefile (优先找 mt7981.mk，找不到则找 filogic.mk)
-MK_FILE=""
-if [ -f "target/linux/mediatek/image/mt7981.mk" ]; then
-    MK_FILE="target/linux/mediatek/image/mt7981.mk"
-elif [ -f "target/linux/mediatek/image/filogic.mk" ]; then
-    MK_FILE="target/linux/mediatek/image/filogic.mk"
-fi
+# 3. 递归查找并精准向 mediatek image 下的 mk 文件注入 cudy_tr3000-512m 定义
+TARGET_MK=""
+for f in target/linux/mediatek/image/mt7981.mk target/linux/mediatek/image/filogic.mk target/linux/mediatek/image/Makefile; do
+    if [ -f "$f" ]; then
+        TARGET_MK="$f"
+        break
+    fi
+done
 
-# 4. 动态向 .mk 文件追加 512M 机型定义
-if [ -n "$MK_FILE" ]; then
-    if ! grep -q "cudy_tr3000-512m" "$MK_FILE"; then
-        echo "Appending cudy_tr3000-512m definition to $MK_FILE"
-        cat << 'EOF' >> "$MK_FILE"
+if [ -n "$TARGET_MK" ]; then
+    if ! grep -q "cudy_tr3000-512m" "$TARGET_MK"; then
+        echo "Injecting cudy_tr3000-512m device definition into $TARGET_MK"
+        cat << 'EOF' >> "$TARGET_MK"
 
 define Device/cudy_tr3000-512m
   DEVICE_VENDOR := Cudy
@@ -35,3 +37,194 @@ TARGET_DEVICES += cudy_tr3000-512m
 EOF
     fi
 fi
+
+# 确保 target profile 列表中显式包含 cudy_tr3000-512m
+find target/linux/mediatek/ -name "Makefile" -exec sed -i '/TARGET_DEVICES.*cudy_tr3000-512m/!s/TARGET_DEVICES +=/TARGET_DEVICES += cudy_tr3000-512m /' {} + 2>/dev/null || true
+
+# =========================================================
+# 4. 注入【固件升级】独立顶级菜单与在线升级脚本
+# =========================================================
+
+# 升级脚本
+mkdir -p package/base-files/files/usr/bin
+cat << 'EOF' > package/base-files/files/usr/bin/auto-update-firmware.sh
+#!/bin/sh
+
+REPO="AA9skillz-BN/tr3000-512-25"
+LOG_FILE="/tmp/firmware_update.log"
+
+exec > "$LOG_FILE" 2>&1
+
+echo "=========================================="
+echo "目标仓库: https://github.com/$REPO"
+echo "正在检测网络并连接 GitHub API..."
+echo "=========================================="
+
+API_URL="https://api.github.com/repos/$REPO/releases/latest"
+RELEASE_JSON=$(curl -sL "$API_URL")
+
+DOWNLOAD_URL=$(echo "$RELEASE_JSON" | grep -o 'https://[^" ]*cudy_tr3000-512m[^" ]*sysupgrade\.bin' | head -n 1)
+if [ -z "$DOWNLOAD_URL" ]; then
+    DOWNLOAD_URL=$(echo "$RELEASE_JSON" | grep -o 'https://[^" ]*sysupgrade\.bin' | head -n 1)
+fi
+
+TAG_NAME=$(echo "$RELEASE_JSON" | grep -o '"tag_name": *"[^"]*"' | head -n 1 | cut -d'"' -f4)
+
+if [ -z "$DOWNLOAD_URL" ]; then
+    echo "❌ 检查失败: 未能从 GitHub Release 中获取到固件下载地址！"
+    exit 1
+fi
+
+echo "✔ 发现最新可用版本: ${TAG_NAME:-最新发布}"
+echo "下载链接: $DOWNLOAD_URL"
+echo ""
+
+TMP_FILE="/tmp/firmware_upgrade.bin"
+rm -f "$TMP_FILE"
+
+echo "正在下载固件至内存缓存区 (请勿断电)..."
+curl -L -k -o "$TMP_FILE" "$DOWNLOAD_URL"
+
+if [ $? -ne 0 ] || [ ! -s "$TMP_FILE" ]; then
+    echo "❌ 固件下载失败，请检查路由器网络连接！"
+    rm -f "$TMP_FILE"
+    exit 1
+fi
+
+echo "✔ 固件下载完成，大小: $(ls -lh $TMP_FILE | awk '{print $5}')"
+echo ""
+
+echo "正在执行固件安全校验..."
+if ! sysupgrade -t "$TMP_FILE"; then
+    echo "❌ 固件校验不通过！文件不兼容当前设备，已终止升级以防止变砖。"
+    rm -f "$TMP_FILE"
+    exit 1
+fi
+
+echo "✔ 校验成功！将在 3 秒后执行自动刷机并重启..."
+echo "升级完成后管理地址仍为: 192.168.6.1。"
+echo "=========================================="
+
+sleep 3
+sysupgrade "$TMP_FILE"
+EOF
+chmod +x package/base-files/files/usr/bin/auto-update-firmware.sh
+
+# 注册独立顶级菜单
+mkdir -p package/base-files/files/usr/share/luci/menu.d
+cat << 'EOF' > package/base-files/files/usr/share/luci/menu.d/luci-app-autoupdate.json
+{
+	"admin/autoupdate": {
+		"title": "固件升级",
+		"order": 90,
+		"action": {
+			"type": "view",
+			"path": "autoupdate/index"
+		}
+	}
+}
+EOF
+
+# 权限控制 ACL
+mkdir -p package/base-files/files/usr/share/rpcd/acl.d
+cat << 'EOF' > package/base-files/files/usr/share/rpcd/acl.d/luci-app-autoupdate.json
+{
+	"luci-app-autoupdate": {
+		"description": "Grant access to autoupdate procedures",
+		"read": {
+			"file": {
+				"/tmp/firmware_update.log": [ "read" ]
+			}
+		},
+		"write": {
+			"file": {
+				"/usr/bin/auto-update-firmware.sh": [ "exec" ]
+			}
+		}
+	}
+}
+EOF
+
+# 现代交互 UI
+mkdir -p package/base-files/files/www/luci-static/resources/view/autoupdate
+cat << 'EOF' > package/base-files/files/www/luci-static/resources/view/autoupdate/index.js
+'use strict';
+'require view';
+'require fs';
+'require ui';
+
+return view.extend({
+	load: function() {
+		return Promise.all([
+			fs.read_direct('/tmp/firmware_update.log').catch(function() { return ''; }),
+			fs.lines('/etc/openwrt_release').catch(function() { return []; })
+		]);
+	},
+
+	render: function(data) {
+		var logText = data[0] || '点击下方按钮，开始检查并拉取仓库最新发布的 25.x 固件...';
+
+		var viewDOM = E('div', { 'class': 'cbi-map' }, [
+			E('h2', {}, _('在线固件升级')),
+			E('div', { 'class': 'cbi-map-descr' }, _('一键拉取 AA9skillz-BN/tr3000-512-25 仓库最新 Release 固件，保留配置自动升级。')),
+
+			E('div', { 'class': 'cbi-section' }, [
+				E('div', { 'class': 'cbi-section-node' }, [
+					E('div', { 'class': 'cbi-value' }, [
+						E('label', { 'class': 'cbi-value-title' }, _('目标机型')),
+						E('div', { 'class': 'cbi-value-field' }, E('strong', {}, 'Cudy TR3000 (512MB Flash / mod-490)'))
+					]),
+					E('div', { 'class': 'cbi-value' }, [
+						E('label', { 'class': 'cbi-value-title' }, _('升级来源')),
+						E('div', { 'class': 'cbi-value-field' }, 'GitHub: AA9skillz-BN/tr3000-512-25 (Releases)')
+					])
+				])
+			]),
+
+			E('div', { 'class': 'cbi-section' }, [
+				E('h3', {}, _('操作面板')),
+				E('div', { 'class': 'cbi-section-node' }, [
+					E('div', { 'style': 'margin-bottom: 15px;' }, [
+						E('button', {
+							'class': 'cbi-button cbi-button-action important',
+							'click': function(ev) {
+								ev.target.disabled = true;
+								ui.showModal(_('正在处理'), [
+									E('p', { 'class': 'spinning' }, _('已启动在线升级进程，请观察下方控制台输出...'))
+								]);
+								setTimeout(function() { ui.hideModal(); }, 2500);
+
+								fs.exec('/usr/bin/auto-update-firmware.sh').then(function() {
+									ev.target.disabled = false;
+								});
+
+								var poll = window.setInterval(function() {
+									fs.read_direct('/tmp/firmware_update.log').then(function(res) {
+										var logArea = document.getElementById('update_log_area');
+										if (logArea && res) {
+											logArea.value = res;
+											logArea.scrollTop = logArea.scrollHeight;
+										}
+									});
+								}, 1500);
+							}
+						}, _('⚡ 立即检查并拉取最新固件升级'))
+					]),
+					E('textarea', {
+						'id': 'update_log_area',
+						'class': 'cbi-input-textarea',
+						'style': 'width: 100%; height: 240px; font-family: monospace; background: #181818; color: #00ff66; padding: 10px; border-radius: 6px; border: 1px solid #333;',
+						'readonly': 'readonly'
+					}, logText)
+				])
+			])
+		]);
+
+		return viewDOM;
+	},
+
+	handleSaveApply: null,
+	handleSave: null,
+	handleReset: null
+});
+EOF
