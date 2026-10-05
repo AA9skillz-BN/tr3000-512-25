@@ -11,19 +11,12 @@ if [ -f "$DTS_SRC" ]; then
     cp -f "$DTS_SRC" target/linux/mediatek/dts/
 fi
 
-# 3. 递归查找并精准向 mediatek image 下的 mk 文件注入 cudy_tr3000-512m 定义
-TARGET_MK=""
-for f in target/linux/mediatek/image/mt7981.mk target/linux/mediatek/image/filogic.mk target/linux/mediatek/image/Makefile; do
-    if [ -f "$f" ]; then
-        TARGET_MK="$f"
-        break
-    fi
-done
-
-if [ -n "$TARGET_MK" ]; then
-    if ! grep -q "cudy_tr3000-512m" "$TARGET_MK"; then
-        echo "Injecting cudy_tr3000-512m device definition into $TARGET_MK"
-        cat << 'EOF' >> "$TARGET_MK"
+# 3. 遍历注入 512M 机型定义到目标 Makefile 中 (兼容 25.x 的 filogic.mk 与 mt7981.mk)
+for mk_target in "target/linux/mediatek/image/filogic.mk" "target/linux/mediatek/image/mt7981.mk" "target/linux/mediatek/image/Makefile"; do
+    if [ -f "$mk_target" ]; then
+        if ! grep -q "cudy_tr3000-512m" "$mk_target"; then
+            echo "Injecting cudy_tr3000-512m definition into $mk_target"
+            cat << 'EOF' >> "$mk_target"
 
 define Device/cudy_tr3000-512m
   DEVICE_VENDOR := Cudy
@@ -35,17 +28,15 @@ define Device/cudy_tr3000-512m
 endef
 TARGET_DEVICES += cudy_tr3000-512m
 EOF
+        fi
     fi
-fi
-
-# 确保 target profile 列表中显式包含 cudy_tr3000-512m
-find target/linux/mediatek/ -name "Makefile" -exec sed -i '/TARGET_DEVICES.*cudy_tr3000-512m/!s/TARGET_DEVICES +=/TARGET_DEVICES += cudy_tr3000-512m /' {} + 2>/dev/null || true
+done
 
 # =========================================================
 # 4. 注入【固件升级】独立顶级菜单与在线升级脚本
 # =========================================================
 
-# 升级脚本
+# 核心在线升级脚本
 mkdir -p package/base-files/files/usr/bin
 cat << 'EOF' > package/base-files/files/usr/bin/auto-update-firmware.sh
 #!/bin/sh
@@ -71,7 +62,7 @@ fi
 TAG_NAME=$(echo "$RELEASE_JSON" | grep -o '"tag_name": *"[^"]*"' | head -n 1 | cut -d'"' -f4)
 
 if [ -z "$DOWNLOAD_URL" ]; then
-    echo "❌ 检查失败: 未能从 GitHub Release 中获取到固件下载地址！"
+    echo "❌ 检查失败: 未能在最新 Release 中找到匹配的固件！"
     exit 1
 fi
 
@@ -96,7 +87,7 @@ echo ""
 
 echo "正在执行固件安全校验..."
 if ! sysupgrade -t "$TMP_FILE"; then
-    echo "❌ 固件校验不通过！文件不兼容当前设备，已终止升级以防止变砖。"
+    echo "❌ 固件校验不通过！可能文件损坏或型号不匹配，已终止升级以防止变砖。"
     rm -f "$TMP_FILE"
     exit 1
 fi
