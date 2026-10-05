@@ -1,92 +1,11 @@
+// SPDX-License-Identifier: (GPL-2.0 OR MIT)
+
 /dts-v1/;
-#include "mt7981b.dtsi"
-#include <dt-bindings/gpio/gpio.h>
-#include <dt-bindings/input/input.h>
-#include <dt-bindings/leds/common.h>
+#include "mt7981b-cudy-tr3000.dts"
 
 / {
-	model = "Cudy TR3000 v1 512MB Flash";
-	compatible = "cudy,tr3000-v1", "mediatek,mt7981b";
-
-	aliases {
-		serial0 = &uart0;
-		led-boot = &led_status;
-		led-failsafe = &led_status;
-		led-running = &led_status;
-		led-upgrade = &led_status;
-	};
-
-	chosen {
-		stdout-path = "serial0:115200n8";
-	};
-
-	memory@40000000 {
-		device_type = "memory";
-		reg = <0 0x40000000 0 0x10000000>; /* 恢复原厂 256MB RAM */
-	};
-
-	keys {
-		compatible = "gpio-keys";
-
-		reset {
-			label = "reset";
-			gpios = <&pio 1 GPIO_ACTIVE_LOW>;
-			linux,code = <KEY_RESTART>;
-		};
-
-		wps {
-			label = "wps";
-			gpios = <&pio 0 GPIO_ACTIVE_LOW>;
-			linux,code = <KEY_WPS_BUTTON>;
-		};
-	};
-
-	leds {
-		compatible = "gpio-leds";
-
-		led_status: status {
-			function = LED_FUNCTION_STATUS;
-			color = <LED_COLOR_ID_WHITE>;
-			gpios = <&pio 7 GPIO_ACTIVE_HIGH>;
-		};
-	};
-};
-
-&uart0 {
-	status = "okay";
-};
-
-&eth {
-	status = "okay";
-
-	gmac0: mac@0 {
-		compatible = "mediatek,eth-mac";
-		reg = <0>;
-		phy-mode = "2500base-x";
-
-		fixed-link {
-			speed = <2500>;
-			full-duplex;
-			pause;
-		};
-	};
-
-	gmac1: mac@1 {
-		compatible = "mediatek,eth-mac";
-		reg = <1>;
-		phy-mode = "gmii";
-		phy-handle = <&phy0>;
-	};
-};
-
-&mdio_bus {
-	phy0: ethernet-phy@0 {
-		compatible = "ethernet-phy-id03a2.9461";
-		reg = <0>;
-		reset-gpios = <&pio 39 GPIO_ACTIVE_LOW>;
-		reset-assert-us = <10000>;
-		reset-deassert-us = <10000>;
-	};
+	model = "Cudy TR3000 (512MB Flash)";
+	compatible = "cudy,tr3000-512m", "cudy,tr3000", "mediatek,mt7981";
 };
 
 &spi0 {
@@ -94,9 +13,12 @@
 	pinctrl-0 = <&spi0_flash_pins>;
 	status = "okay";
 
-	spi_nand: flash@0 {
+	spi_nand@0 {
 		compatible = "spi-nand";
+		#address-cells = <1>;
+		#size-cells = <1>;
 		reg = <0>;
+
 		spi-max-frequency = <52000000>;
 		spi-tx-bus-width = <4>;
 		spi-rx-bus-width = <4>;
@@ -107,42 +29,33 @@
 			#size-cells = <1>;
 
 			partition@0 {
-				label = "BL2";
-				reg = <0x0000000 0x0100000>;
+				label = "bl2";
+				reg = <0x000000 0x100000>;
 				read-only;
 			};
 
 			partition@100000 {
-				label = "u-boot-env";
-				reg = <0x0100000 0x0080000>;
+				label = "orig-env";
+				reg = <0x100000 0x80000>;
+				read-only;
 			};
 
 			partition@180000 {
-				label = "Factory";
-				reg = <0x0180000 0x0200000>;
+				label = "factory";
+				reg = <0x180000 0x200000>;
 				read-only;
 			};
 
 			partition@380000 {
-				label = "bdinfo";
-				reg = <0x0380000 0x0040000>;
+				label = "fip";
+				reg = <0x380000 0x200000>;
 				read-only;
 			};
 
-			partition@3c0000 {
-				label = "FIP";
-				reg = <0x03c0000 0x0200000>;
-				read-only;
-			};
-
-			partition@5c0000 {
+			partition@580000 {
 				label = "ubi";
-				reg = <0x05c0000 0x1da40000>;
+				reg = <0x580000 0x1ea80000>;
 			};
 		};
 	};
-};
-
-&wifi {
-	status = "okay";
 };
