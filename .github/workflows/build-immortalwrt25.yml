@@ -65,7 +65,7 @@ jobs:
         cd openwrt
         $GITHUB_WORKSPACE/$DIY_P2_SH || true
 
-        # 智能匹配 .config，避免 [ -e ] && 导致 bash -e 误判退出
+        # 智能匹配 .config，避免脆弱单行触发 exit 1
         cd $GITHUB_WORKSPACE
         if [ -f "$CONFIG_FILE" ]; then
             echo "Found config at $CONFIG_FILE"
@@ -80,11 +80,11 @@ jobs:
       id: package
       run: |
         cd openwrt
-        # 重置其他同芯片机型声明，确保只锁定 cudy_tr3000-512m
-        sed -i 's/CONFIG_TARGET_mediatek_filogic_DEVICE_.*=y/CONFIG_TARGET_mediatek_filogic_DEVICE_cudy_tr3000-512m=y/g' .config 2>/dev/null || true
+        # 重置其他同芯片机型声明，确保锁定 cudy_tr3000-512mb-v1
+        sed -i 's/CONFIG_TARGET_mediatek_filogic_DEVICE_.*=y/CONFIG_TARGET_mediatek_filogic_DEVICE_cudy_tr3000-512mb-v1=y/g' .config 2>/dev/null || true
         echo "CONFIG_TARGET_mediatek=y" >> .config
         echo "CONFIG_TARGET_mediatek_filogic=y" >> .config
-        echo "CONFIG_TARGET_mediatek_filogic_DEVICE_cudy_tr3000-512m=y" >> .config
+        echo "CONFIG_TARGET_mediatek_filogic_DEVICE_cudy_tr3000-512mb-v1=y" >> .config
         make defconfig
         make download -j8
         find dl -size -1024c -exec ls -l {} \;
@@ -97,7 +97,7 @@ jobs:
         echo -e "$(nproc) thread compile"
         make -j$(nproc) || make -j1 || make -j1 V=s
         echo "status=success" >> $GITHUB_OUTPUT
-        echo "DEVICE_NAME=_cudy_tr3000-512m" >> $GITHUB_ENV
+        echo "DEVICE_NAME=_cudy_tr3000-512mb-v1" >> $GITHUB_ENV
         echo "FILE_DATE=_$(date +"%Y%m%d%H%M")" >> $GITHUB_ENV
 
     - name: Organize files
@@ -108,7 +108,7 @@ jobs:
         cd openwrt/bin/targets/*/*
         
         # 优先提取专属固件、sysupgrade 镜像与哈希校验表
-        cp -f *cudy_tr3000-512m*.bin /tmp/firmware_out/ 2>/dev/null || true
+        cp -f *cudy_tr3000-512mb-v1*.bin /tmp/firmware_out/ 2>/dev/null || true
         cp -f *sysupgrade.bin /tmp/firmware_out/ 2>/dev/null || true
         cp -f sha256sums /tmp/firmware_out/ 2>/dev/null || true
         
