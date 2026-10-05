@@ -51,7 +51,7 @@ jobs:
         [ -e $FEEDS_CONF ] && cp $FEEDS_CONF openwrt/feeds.conf.default
         chmod +x $DIY_P1_SH
         cd openwrt
-        $GITHUB_WORKSPACE/$DIY_P1_SH
+        $GITHUB_WORKSPACE/$DIY_P1_SH || true
 
     - name: Update feeds
       run: cd openwrt && ./scripts/feeds update -a
@@ -61,14 +61,20 @@ jobs:
 
     - name: Load custom configuration
       run: |
-        # 1. 先执行 diy-part2.sh 将 cudy_tr3000-512m 机型注入 Makefile 与 DTS 目录
         chmod +x $DIY_P2_SH
         cd openwrt
         $GITHUB_WORKSPACE/$DIY_P2_SH || true
 
-        # 2. 注入完成后再拷贝 .config，确保 make defconfig 时能正确识别设备符号
+        # 智能匹配 .config，避免 [ -e ] && 导致 bash -e 误判退出
         cd $GITHUB_WORKSPACE
-        [ -e $CONFIG_FILE ] && cp $CONFIG_FILE openwrt/.config
+        if [ -f "$CONFIG_FILE" ]; then
+            echo "Found config at $CONFIG_FILE"
+            cp -f "$CONFIG_FILE" openwrt/.config
+        elif [ -f ".config" ]; then
+            echo "Found config at root .config"
+            cp -f ".config" openwrt/.config
+        fi
+        exit 0
 
     - name: Download package
       id: package
