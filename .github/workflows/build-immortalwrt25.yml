@@ -3,6 +3,9 @@ name: Build ImmortalWrt (VIKINGYFY 25.x / 512M)
 on:
   repository_dispatch:
   workflow_dispatch:
+  schedule:
+    # 国际标准时间(UTC) 每周二 20:00 -> 即北京时间每周三凌晨 04:00 自动运行
+    - cron: '0 20 * * 2'
 
 env:
   REPO_URL: https://github.com/VIKINGYFY/immortalwrt.git
@@ -40,7 +43,6 @@ jobs:
     - name: Clone source code
       working-directory: /workdir
       run: |
-        df -hT $PWD
         git clone $REPO_URL -b $REPO_BRANCH openwrt
         ln -sf /workdir/openwrt $GITHUB_WORKSPACE/openwrt
 
@@ -59,15 +61,24 @@ jobs:
 
     - name: Load custom configuration
       run: |
-        [ -e $CONFIG_FILE ] && cp $CONFIG_FILE openwrt/.config
+        # 1. 先执行 diy-part2 注入机型定义与 DTS
         chmod +x $DIY_P2_SH
         cd openwrt
         $GITHUB_WORKSPACE/$DIY_P2_SH
+        
+        # 2. 再加载自定义 .config
+        cd $GITHUB_WORKSPACE
+        [ -e $CONFIG_FILE ] && cp $CONFIG_FILE openwrt/.config
 
     - name: Download package
       id: package
       run: |
         cd openwrt
+        # 确保选定 cudy_tr3000-512m
+        sed -i 's/CONFIG_TARGET_mediatek_filogic_DEVICE_.*=y//g' .config
+        echo "CONFIG_TARGET_mediatek=y" >> .config
+        echo "CONFIG_TARGET_mediatek_filogic=y" >> .config
+        echo "CONFIG_TARGET_mediatek_filogic_DEVICE_cudy_tr3000-512m=y" >> .config
         make defconfig
         make download -j8
         find dl -size -1024c -exec ls -l {} \;
@@ -80,31 +91,29 @@ jobs:
         echo -e "$(nproc) thread compile"
         make -j$(nproc) || make -j1 || make -j1 V=s
         echo "status=success" >> $GITHUB_OUTPUT
-        grep '^CONFIG_TARGET.*DEVICE.*=y' .config | sed -r 's/.*DEVICE_(.*)=y/\1/' > DEVICE_NAME
-        [ -s DEVICE_NAME ] && echo "DEVICE_NAME=_$(cat DEVICE_NAME)" >> $GITHUB_ENV
+        echo "DEVICE_NAME=_cudy_tr3000-512m" >> $GITHUB_ENV
         echo "FILE_DATE=_$(date +"%Y%m%d%H%M")" >> $GITHUB_ENV
 
-    - name: Check space usage
-      if: (!cancelled())
-      run: df -hT
-
-    - name: Upload bin directory
-      uses: actions/upload-artifact@v4
-      if: steps.compile.outputs.status == 'success' && env.UPLOAD_BIN_DIR == 'true'
-      with:
-        name: OpenWrt_bin${{ env.DEVICE_NAME }}${{ env.FILE_DATE }}
-        path: openwrt/bin
-
-    - name: Organize files
+    - name: Organize files (精简过滤垃圾文件，只留固件与哈希)
       id: organize
       if: env.UPLOAD_FIRMWARE == 'true' && !cancelled()
       run: |
+        mkdir -p /tmp/firmware_out
         cd openwrt/bin/targets/*/*
-        rm -rf packages
-        echo "FIRMWARE=$PWD" >> $GITHUB_ENV
+        # 仅挑选带 cudy_tr3000 或者是 sysupgrade 的纯固件与校验证书
+        cp -f *cudy_tr3000*.bin /tmp/firmware_out/ 2>/dev/null || true
+        cp -f *sysupgrade.bin /tmp/firmware_out/ 2>/dev/null || true
+        cp -f sha256sums /tmp/firmware_out/ 2>/dev/null || true
+        
+        # 如果以上没匹配到，提取所有 bin 固件
+        if [ -z "$(ls -A /tmp/firmware_out)" ]; then
+            cp -f *.bin /tmp/firmware_out/ 2>/dev/null || true
+        fi
+        
+        echo "FIRMWARE=/tmp/firmware_out" >> $GITHUB_ENV
         echo "status=success" >> $GITHUB_OUTPUT
 
-    - name: Upload firmware directory
+    - name: Upload firmware directory to Artifacts
       uses: actions/upload-artifact@v4
       if: steps.organize.outputs.status == 'success' && !cancelled()
       with:
@@ -115,11 +124,14 @@ jobs:
       id: tag
       if: env.UPLOAD_RELEASE == 'true' && !cancelled()
       run: |
-        echo "release_tag=ImmortalWrt-VIKINGYFY-$(date +"%Y.%m.%d-%H%M")" >> $GITHUB_OUTPUT
+        echo "release_tag=ImmortalWrt-$(date +"%Y.%m.%d-%H%M")" >> $GITHUB_OUTPUT
         touch release.txt
-        echo "Cudy TR3000 (512MB Flash) 固件发布" >> release.txt
-        echo "源码: VIKINGYFY/immortalwrt (owrt 25.x 分支)" >> release.txt
-        echo "请务必在 U-Boot 中切换分区为 mod-490 后刷入。" >> release.txt
+        echo "🚀 Cudy TR3000 (512MB Flash) 专属固件" >> release.txt
+        echo "--------------------------------------------------" >> release.txt
+        echo "• 源码分支: VIKINGYFY/immortalwrt (owrt 25.x)" >> release.txt
+        echo "• 后台管理: 192.168.6.1" >> release.txt
+        echo "• 硬件分区: U-Boot 请选择 mod-490 布局" >> release.txt
+        echo "• 预置功能: 中兴 F50 免驱 / MTK PPE加速 / OpenClash 25.x 运行环境 / 专属在线更新" >> release.txt
         echo "status=success" >> $GITHUB_OUTPUT
 
     - name: Upload firmware to release
@@ -131,3 +143,13 @@ jobs:
         tag_name: ${{ steps.tag.outputs.release_tag }}
         body_path: release.txt
         files: ${{ env.FIRMWARE }}/*
+
+    # 自动轮转清理：只保留最新的 3 个 Release，删除旧 Release 与 Tag 防臃肿
+    - name: Delete older releases (保留最新 3 个)
+      uses: dev-drprasad/delete-older-releases@v0.3.3
+      if: steps.tag.outputs.status == 'success' && !cancelled()
+      with:
+        keep_latest: 3
+        delete_tags: true
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
