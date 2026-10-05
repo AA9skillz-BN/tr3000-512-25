@@ -11,10 +11,10 @@ if [ -f "$DTS_SRC" ]; then
     cp -f "$DTS_SRC" target/linux/mediatek/dts/
 fi
 
-# 3. 精准单点向 filogic.mk 注入 512M 机型定义 (参数完全对齐上游与 mod-490)
+# 3. 精准单点向 filogic.mk 注入 512M 机型定义 (显式防止 grep 返回非 0 退出码)
 FILOGIC_MK="target/linux/mediatek/image/filogic.mk"
 if [ -f "$FILOGIC_MK" ]; then
-    if ! grep -q "cudy_tr3000-512m" "$FILOGIC_MK"; then
+    if ! grep -qs "cudy_tr3000-512m" "$FILOGIC_MK"; then
         echo "Injecting cudy_tr3000-512m definition into $FILOGIC_MK"
         cat << 'EOF' >> "$FILOGIC_MK"
 
@@ -81,13 +81,13 @@ rm -f "$TMP_FILE"
 echo "正在下载固件至内存缓存区 (请勿断电)..."
 curl -L -k -o "$TMP_FILE" "$DOWNLOAD_URL"
 
-if [ $? -ne 0 ] || [ ! -s "$TMP_FILE" ]; then
+if [ $? -ne 0 ] \vert{}\vert{} [ ! -s "$TMP_FILE" ]; then
     echo "❌ 固件下载失败，请检查路由器网络连接！"
     rm -f "$TMP_FILE"
     exit 1
 fi
 
-echo "✔ 固件下载完成，大小: $(ls -lh $TMP_FILE | awk '{print $5}')"
+echo "✔ 固件下载完成，大小: $(ls -lh$TMP_FILE | awk '{print $5}')"
 echo ""
 
 echo "正在执行固件安全校验..."
@@ -104,7 +104,7 @@ echo "=========================================="
 sleep 3
 sysupgrade "$TMP_FILE"
 EOF
-chmod +x package/base-files/files/usr/bin/auto-update-firmware.sh
+chmod +x package/base-files/files/usr/bin/auto-update-firmware.sh || true
 
 # B. 注册独立顶级菜单
 mkdir -p package/base-files/files/usr/share/luci/menu.d
@@ -191,38 +191,3 @@ return view.extend({
 								setTimeout(function() { ui.hideModal(); }, 2500);
 
 								fs.exec('/usr/bin/auto-update-firmware.sh').then(function() {
-									ev.target.disabled = false;
-								});
-
-								var poll = window.setInterval(function() {
-									fs.read_direct('/tmp/firmware_update.log').then(function(res) {
-										var logArea = document.getElementById('update_log_area');
-										if (logArea && res) {
-											logArea.value = res;
-											logArea.scrollTop = logArea.scrollHeight;
-										}
-									});
-								}, 1500);
-							}
-						}, _('⚡ 立即检查并拉取最新固件升级'))
-					]),
-					E('textarea', {
-						'id': 'update_log_area',
-						'class': 'cbi-input-textarea',
-						'style': 'width: 100%; height: 240px; font-family: monospace; background: #181818; color: #00ff66; padding: 10px; border-radius: 6px; border: 1px solid #333;',
-						'readonly': 'readonly'
-					}, logText)
-				])
-			])
-		]);
-
-		return viewDOM;
-	},
-
-	handleSaveApply: null,
-	handleSave: null,
-	handleReset: null
-});
-EOF
-
-exit 0
