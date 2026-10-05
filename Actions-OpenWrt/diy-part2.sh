@@ -1,7 +1,7 @@
 #!/bin/bash
 # Description: OpenWrt DIY script part 2 (After Update feeds)
 
-# 1. 修改默认管理后台 IP 为 192.168.6.1
+# 1. 修改默认后台 IP 为 192.168.6.1
 sed -i 's/192.168.1.1/192.168.6.1/g' package/base-files/files/bin/config_generate || true
 
 # 2. 复制 512MB 专属设备树 (DTS) 到内核 dts 目录
@@ -11,7 +11,7 @@ if [ -f "$DTS_SRC" ]; then
     cp -f "$DTS_SRC" target/linux/mediatek/dts/
 fi
 
-# 3. 精准向 filogic.mk 注入 512M 机型定义 (单点单次注入，继承官方成熟配置)
+# 3. 精准单点向 filogic.mk 注入 512M 机型参数 (具备完整的 UBI 与 sysupgrade 宏)
 FILOGIC_MK="target/linux/mediatek/image/filogic.mk"
 if [ -f "$FILOGIC_MK" ]; then
     if ! grep -q "cudy_tr3000-512m" "$FILOGIC_MK"; then
@@ -19,10 +19,17 @@ if [ -f "$FILOGIC_MK" ]; then
         cat << 'EOF' >> "$FILOGIC_MK"
 
 define Device/cudy_tr3000-512m
-  $(Device/cudy_tr3000-v1)
+  DEVICE_VENDOR := Cudy
   DEVICE_MODEL := TR3000 (512MB Mod)
   DEVICE_DTS := mt7981b-cudy-tr3000-512m
+  DEVICE_DTS_DIR := ../dts
+  SUPPORTED_DEVICES += R47 cudy,tr3000-v1
+  UBINIZE_OPTS := -E 5
+  BLOCKSIZE := 128k
+  PAGESIZE := 2048
   IMAGE_SIZE := 490M
+  KERNEL_IN_UBI := 1
+  IMAGE/sysupgrade.bin := sysupgrade-tar | append-metadata
 endef
 TARGET_DEVICES += cudy_tr3000-512m
 EOF
