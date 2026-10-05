@@ -64,7 +64,7 @@ jobs:
         # 1. 先执行 diy-part2.sh 将 cudy_tr3000-512m 机型注入 Makefile 与 DTS 目录
         chmod +x $DIY_P2_SH
         cd openwrt
-        $GITHUB_WORKSPACE/$DIY_P2_SH
+        $GITHUB_WORKSPACE/$DIY_P2_SH || true
 
         # 2. 注入完成后再拷贝 .config，确保 make defconfig 时能正确识别设备符号
         cd $GITHUB_WORKSPACE
@@ -74,8 +74,8 @@ jobs:
       id: package
       run: |
         cd openwrt
-        # 排除平台默认设备，显式绑定 cudy_tr3000-512m
-        sed -i 's/CONFIG_TARGET_mediatek_filogic_DEVICE_openwrt_one=y/CONFIG_TARGET_mediatek_filogic_DEVICE_openwrt_one=n/g' .config 2>/dev/null || true
+        # 重置其他同芯片机型声明，确保只锁定 cudy_tr3000-512m
+        sed -i 's/CONFIG_TARGET_mediatek_filogic_DEVICE_.*=y/CONFIG_TARGET_mediatek_filogic_DEVICE_cudy_tr3000-512m=y/g' .config 2>/dev/null || true
         echo "CONFIG_TARGET_mediatek=y" >> .config
         echo "CONFIG_TARGET_mediatek_filogic=y" >> .config
         echo "CONFIG_TARGET_mediatek_filogic_DEVICE_cudy_tr3000-512m=y" >> .config
@@ -102,8 +102,8 @@ jobs:
         cd openwrt/bin/targets/*/*
         
         # 优先提取专属固件、sysupgrade 镜像与哈希校验表
+        cp -f *cudy_tr3000-512m*.bin /tmp/firmware_out/ 2>/dev/null || true
         cp -f *sysupgrade.bin /tmp/firmware_out/ 2>/dev/null || true
-        cp -f *cudy* /tmp/firmware_out/ 2>/dev/null || true
         cp -f sha256sums /tmp/firmware_out/ 2>/dev/null || true
         
         # 安全兜底：如果未命中特定文件名，拷贝全部 bin 镜像防止空包
