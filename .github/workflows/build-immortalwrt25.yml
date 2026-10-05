@@ -61,12 +61,12 @@ jobs:
 
     - name: Load custom configuration
       run: |
-        # 1. 先执行 diy-part2 注入机型定义与 DTS
+        # 1. 先执行 diy-part2.sh 将 cudy_tr3000-512m 机型注入 Makefile 与 DTS 目录
         chmod +x $DIY_P2_SH
         cd openwrt
         $GITHUB_WORKSPACE/$DIY_P2_SH
-        
-        # 2. 再加载自定义 .config
+
+        # 2. 注入完成后再拷贝 .config，确保 make defconfig 时能正确识别设备符号
         cd $GITHUB_WORKSPACE
         [ -e $CONFIG_FILE ] && cp $CONFIG_FILE openwrt/.config
 
@@ -74,8 +74,8 @@ jobs:
       id: package
       run: |
         cd openwrt
-        # 确保选定 cudy_tr3000-512m
-        sed -i 's/CONFIG_TARGET_mediatek_filogic_DEVICE_.*=y//g' .config
+        # 排除平台默认设备，显式绑定 cudy_tr3000-512m
+        sed -i 's/CONFIG_TARGET_mediatek_filogic_DEVICE_openwrt_one=y/CONFIG_TARGET_mediatek_filogic_DEVICE_openwrt_one=n/g' .config 2>/dev/null || true
         echo "CONFIG_TARGET_mediatek=y" >> .config
         echo "CONFIG_TARGET_mediatek_filogic=y" >> .config
         echo "CONFIG_TARGET_mediatek_filogic_DEVICE_cudy_tr3000-512m=y" >> .config
@@ -94,20 +94,23 @@ jobs:
         echo "DEVICE_NAME=_cudy_tr3000-512m" >> $GITHUB_ENV
         echo "FILE_DATE=_$(date +"%Y%m%d%H%M")" >> $GITHUB_ENV
 
-    - name: Organize files (精简过滤垃圾文件，只留固件与哈希)
+    - name: Organize files
       id: organize
       if: env.UPLOAD_FIRMWARE == 'true' && !cancelled()
       run: |
         mkdir -p /tmp/firmware_out
         cd openwrt/bin/targets/*/*
-        # 仅挑选带 cudy_tr3000 或者是 sysupgrade 的纯固件与校验证书
-        cp -f *cudy_tr3000*.bin /tmp/firmware_out/ 2>/dev/null || true
+        
+        # 优先提取专属固件、sysupgrade 镜像与哈希校验表
         cp -f *sysupgrade.bin /tmp/firmware_out/ 2>/dev/null || true
+        cp -f *cudy* /tmp/firmware_out/ 2>/dev/null || true
         cp -f sha256sums /tmp/firmware_out/ 2>/dev/null || true
         
-        # 如果以上没匹配到，提取所有 bin 固件
-        if [ -z "$(ls -A /tmp/firmware_out)" ]; then
+        # 安全兜底：如果未命中特定文件名，拷贝全部 bin 镜像防止空包
+        if [ -z "$(ls -A /tmp/firmware_out 2>/dev/null)" ]; then
+            echo "Fallback copy: copying all bin files."
             cp -f *.bin /tmp/firmware_out/ 2>/dev/null || true
+            cp -f sha256sums /tmp/firmware_out/ 2>/dev/null || true
         fi
         
         echo "FIRMWARE=/tmp/firmware_out" >> $GITHUB_ENV
@@ -126,12 +129,12 @@ jobs:
       run: |
         echo "release_tag=ImmortalWrt-$(date +"%Y.%m.%d-%H%M")" >> $GITHUB_OUTPUT
         touch release.txt
-        echo "🚀 Cudy TR3000 (512MB Flash) 专属固件" >> release.txt
+        echo "🚀 Cudy TR3000 (512MB Flash) 专属固件发布" >> release.txt
         echo "--------------------------------------------------" >> release.txt
         echo "• 源码分支: VIKINGYFY/immortalwrt (owrt 25.x)" >> release.txt
-        echo "• 后台管理: 192.168.6.1" >> release.txt
+        echo "• 默认后台: 192.168.6.1" >> release.txt
         echo "• 硬件分区: U-Boot 请选择 mod-490 布局" >> release.txt
-        echo "• 预置功能: 中兴 F50 免驱 / MTK PPE加速 / OpenClash 25.x 运行环境 / 专属在线更新" >> release.txt
+        echo "• 预置功能: 中兴 F50 免驱 / MTK PPE硬件加速 / OpenClash 25.x 运行环境 / 专属在线更新" >> release.txt
         echo "status=success" >> $GITHUB_OUTPUT
 
     - name: Upload firmware to release
@@ -144,10 +147,10 @@ jobs:
         body_path: release.txt
         files: ${{ env.FIRMWARE }}/*
 
-    # 自动轮转清理：只保留最新的 3 个 Release，删除旧 Release 与 Tag 防臃肿
     - name: Delete older releases (保留最新 3 个)
       uses: dev-drprasad/delete-older-releases@v0.3.3
       if: steps.tag.outputs.status == 'success' && !cancelled()
+      continue-on-error: true
       with:
         keep_latest: 3
         delete_tags: true
