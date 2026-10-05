@@ -11,7 +11,7 @@ if [ -f "$DTS_SRC" ]; then
     cp -f "$DTS_SRC" target/linux/mediatek/dts/
 fi
 
-# 3. 精准单点向 filogic.mk 注入 512M 机型参数 (具备完整的 UBI 与 sysupgrade 宏)
+# 3. 精准单点向 filogic.mk 注入 512M 机型定义 (参数完全对齐上游与 mod-490)
 FILOGIC_MK="target/linux/mediatek/image/filogic.mk"
 if [ -f "$FILOGIC_MK" ]; then
     if ! grep -q "cudy_tr3000-512m" "$FILOGIC_MK"; then
@@ -30,6 +30,7 @@ define Device/cudy_tr3000-512m
   IMAGE_SIZE := 490M
   KERNEL_IN_UBI := 1
   IMAGE/sysupgrade.bin := sysupgrade-tar | append-metadata
+  DEVICE_PACKAGES := kmod-usb3 kmod-mt7981-firmware mt7981-wo-firmware
 endef
 TARGET_DEVICES += cudy_tr3000-512m
 EOF
