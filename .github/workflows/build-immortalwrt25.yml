@@ -1,188 +1,174 @@
-name: Build ImmortalWrt 25.x for NRadio C8-688
+name: Build ImmortalWrt (VIKINGYFY 25.x / 512M)
 
 on:
-  # 1. 允许在 GitHub 网页端手动触发构建
+  repository_dispatch:
   workflow_dispatch:
-  # 2. 定时构建：北京时间每周三凌晨 03:00 (UTC 每周二 19:00)
   schedule:
-    - cron: '0 19 * * 2'
+    # 国际标准时间(UTC) 每周二 20:00 -> 即北京时间每周三凌晨 04:00 自动运行
+    - cron: '0 20 * * 2'
 
 env:
-  REPO_URL: https://github.com/immortalwrt/immortalwrt
-  REPO_BRANCH: master
-  CONFIG_FILE: c8-688.config
-  DIY_P1_SH: diy-part1.sh
-  DIY_P2_SH: diy-part2.sh
+  REPO_URL: https://github.com/VIKINGYFY/immortalwrt.git
+  REPO_BRANCH: owrt
+  FEEDS_CONF: Actions-OpenWrt/feeds.conf.default
+  CONFIG_FILE: openwrt-mod/.config
+  DIY_P1_SH: Actions-OpenWrt/diy-part1.sh
+  DIY_P2_SH: Actions-OpenWrt/diy-part2.sh
+  UPLOAD_BIN_DIR: false
   UPLOAD_FIRMWARE: true
   UPLOAD_RELEASE: true
   TZ: Asia/Shanghai
 
 jobs:
   build:
-    runs-on: ubuntu-24.04
-    # 授予 Release 创建与清理所需的写权限
-    permissions:
-      contents: write
+    runs-on: ubuntu-22.04
 
     steps:
     - name: Checkout
       uses: actions/checkout@v4
 
-    - name: Free Disk Space (Maximize Runner Storage)
-      uses: jlumbroso/free-disk-space@main
-      with:
-        tool-cache: false
-        android: true
-        dotnet: true
-        haskell: true
-        large-packages: true
-        docker-images: true
-        swap-storage: true
-
-    - name: Initialize Environment
+    - name: Initialization environment
       env:
         DEBIAN_FRONTEND: noninteractive
       run: |
-        sudo apt-get update -y
-        sudo apt-get install -y build-essential clang flex bison g++ gawk gcc-multilib g++-multilib \
-          gettext git libncurses5-dev libssl-dev python3-setuptools python3-dev rsync unzip zlib1g-dev file wget ccache libfuse-dev
+        sudo rm -rf /etc/apt/sources.list.d/* /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+        sudo -E apt-get -qq update
+        sudo -E apt-get -qq install -y $(cat Actions-OpenWrt/depends.txt 2>/dev/null || echo "ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential bzip2 ccache cmake cpio curl device-tree-compiler fastjar flex gawk gettext gcc-multilib g++-multilib git gperf haveged help2man intltool libc6-dev-i386 libelf-dev libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev libreadline-dev libssl-dev libtool lrzsz mkisofs msmtp nano ninja-build p7zip p7zip-full patch pkgconf python3 python3-pip libpython3-dev qemu-utils rsync scons squashfs-tools subversion swig texinfo uglifyjs upx-ucl unzip vim wget xmlto xxd zlib1g-dev")
+        sudo -E apt-get -qq autoremove --purge
+        sudo -E apt-get -qq clean
         sudo timedatectl set-timezone "$TZ"
         sudo mkdir -p /workdir
         sudo chown $USER:$GROUPS /workdir
-        df -h
 
-    - name: Clone Source Code
+    - name: Clone source code
       working-directory: /workdir
       run: |
-        git clone --depth 1 $REPO_URL -b$REPO_BRANCH openwrt
+        git clone $REPO_URL -b $REPO_BRANCH openwrt
         ln -sf /workdir/openwrt $GITHUB_WORKSPACE/openwrt
 
-    # ================= 1. CCache 编译对象持久化缓存 =================
-    - name: Cache CCache
-      uses: actions/cache@v4
-      with:
-        path: /workdir/openwrt/.ccache
-        key: ${{ runner.os }}-ccache-${{ hashFiles('c8-688.config') }}-${{ github.sha }}
-        restore-keys: |
-          ${{ runner.os }}-ccache-${{ hashFiles('c8-688.config') }}-${{ runner.os }}-ccache-
-
-    - name: Load Custom Feeds (diy-part1.sh)
+    - name: Load custom feeds
       run: |
-        [ -e $DIY_P1_SH ] && chmod +x $DIY_P1_SH && ./$DIY_P1_SH
+        [ -e $FEEDS_CONF ] && cp $FEEDS_CONF openwrt/feeds.conf.default
+        chmod +x $DIY_P1_SH
+        cd openwrt
+        $GITHUB_WORKSPACE/$DIY_P1_SH || true
 
-    - name: Update & Install Feeds
-      working-directory: ./openwrt
-      run: |
-        ./scripts/feeds update -a
-        ./scripts/feeds install -a
+    - name: Update feeds
+      run: cd openwrt && ./scripts/feeds update -a
 
-    - name: Load Custom Configuration (diy-part2.sh)
-      run: |
-        [ -e $DIY_P2_SH ] && chmod +x $DIY_P2_SH && ./$DIY_P2_SH
+    - name: Install feeds
+      run: cd openwrt && ./scripts/feeds install -a
 
-    - name: Load Config & Generate .config
-      working-directory: ./openwrt
+    - name: Load custom configuration
       run: |
-        if [ -e $GITHUB_WORKSPACE/$CONFIG_FILE ]; then
-          cp $GITHUB_WORKSPACE/$CONFIG_FILE .config
+        chmod +x $DIY_P2_SH
+        cd openwrt
+        $GITHUB_WORKSPACE/$DIY_P2_SH || true
+
+        # 智能匹配 .config，规避 [ -e ] && 引发的 bash -e 误判退出
+        cd $GITHUB_WORKSPACE
+        if [ -f "$CONFIG_FILE" ]; then
+            echo "Found config at $CONFIG_FILE"
+            cp -f "$CONFIG_FILE" openwrt/.config
+        elif [ -f ".config" ]; then
+            echo "Found config at root .config"
+            cp -f ".config" openwrt/.config
         fi
-        echo "CONFIG_DEVEL=y" >> .config
-        echo "CONFIG_CCACHE=y" >> .config
-        make defconfig
+        exit 0
 
-    # ================= 2. 交叉工具链持久化缓存 (Toolchain Cache) =================
-    - name: Cache Toolchain & Host Tools
-      uses: actions/cache@v4
-      id: toolchain-cache
-      with:
-        path: |
-          /workdir/openwrt/staging_dir/toolchain-*
-          /workdir/openwrt/staging_dir/host*
-        key: ${{ runner.os }}-toolchain-${{ hashFiles('openwrt/toolchain/**', 'openwrt/tools/**') }}-${{ hashFiles('c8-688.config') }}
-        restore-keys: |
-          ${{ runner.os }}-toolchain-${{ hashFiles('openwrt/toolchain/**', 'openwrt/tools/**') }}-${{ runner.os }}-toolchain-
-
-    - name: Fast Multi-thread Download
-      working-directory: ./openwrt
+    - name: Download package
+      id: package
       run: |
-        make download -j16
+        cd openwrt
+        # 重置其他同芯片机型声明，确保只锁定 cudy_tr3000-512mb-v1
+        sed -i 's/CONFIG_TARGET_mediatek_filogic_DEVICE_.*=y/CONFIG_TARGET_mediatek_filogic_DEVICE_cudy_tr3000-512mb-v1=y/g' .config 2>/dev/null || true
+        echo "CONFIG_TARGET_mediatek=y" >> .config
+        echo "CONFIG_TARGET_mediatek_filogic=y" >> .config
+        echo "CONFIG_TARGET_mediatek_filogic_DEVICE_cudy_tr3000-512mb-v1=y" >> .config
+        make defconfig
+        make download -j8
         find dl -size -1024c -exec ls -l {} \;
         find dl -size -1024c -exec rm -f {} \;
 
-    - name: Optimized Compile Firmware
+    - name: Compile the firmware
       id: compile
-      working-directory: ./openwrt
       run: |
-        export CCACHE_DIR=/workdir/openwrt/.ccache
-        export CCACHE_MAXSIZE=2G
-        export CCACHE_COMPRESS=1
-        export CCACHE_COMPRESSLEVEL=6
-        ccache -z
-        THREADS=$(($(nproc) * 2))
-        echo "Optimized compile threads: $THREADS"
-        make -j$THREADS || make -j1 V=s
-        ccache -s
+        cd openwrt
+        echo -e "$(nproc) thread compile"
+        
+        # 1. 优先编译宿主机构建工具，生成 staging_dir/host/bin/sed 等基础命令，防止报 Error 127
+        make tools/compile -j$(nproc) || make tools/compile -j1 V=s
+        
+        # 2. 编译 aarch64 交叉编译工具链
+        make toolchain/compile -j$(nproc) || make toolchain/compile -j1 V=s
+        
+        # 3. 工具链就绪后，预编译 mac80211，提前产出 autoconf.h，消除 mt76 并发竞争
+        make package/kernel/mac80211/compile -j$(nproc) || make package/kernel/mac80211/compile -j1 V=s
+        
+        # 4. 全量并发编译整机固件
+        make -j$(nproc) || make -j1 || make -j1 V=s
+        
         echo "status=success" >> $GITHUB_OUTPUT
+        echo "DEVICE_NAME=_cudy_tr3000-512mb-v1" >> $GITHUB_ENV
+        echo "FILE_DATE=_$(date +"%Y%m%d%H%M")" >> $GITHUB_ENV
 
-    - name: Prepare Artifacts & OTA Files
+    - name: Organize files
       id: organize
-      if: steps.compile.outputs.status == 'success'
+      if: env.UPLOAD_FIRMWARE == 'true' && !cancelled()
       run: |
+        mkdir -p /tmp/firmware_out
         cd openwrt/bin/targets/*/*
-        rm -rf packages
         
-        # 彻底清除 BL2 引导文件、内核镜像调试包、buildinfo 及 profile 元数据
-        rm -f *initramfs* *kernel.bin *-bl2.bin *.buildinfo profiles.json *.manifest
+        # 优先提取专属固件、sysupgrade 镜像与哈希校验表
+        cp -f *cudy_tr3000-512mb-v1*.bin /tmp/firmware_out/ 2>/dev/null || true
+        cp -f *sysupgrade.bin /tmp/firmware_out/ 2>/dev/null || true
+        cp -f sha256sums /tmp/firmware_out/ 2>/dev/null || true
         
-        BUILD_VER="$(date +%Y.%m.%d-%H%M)"
-        echo "$BUILD_VER" > version.txt
-        echo "BUILD_VER=$BUILD_VER" >> $GITHUB_ENV
+        # 安全兜底：如果未命中特定文件名，拷贝全部 bin 镜像防止空包
+        if [ -z "$(ls -A /tmp/firmware_out 2>/dev/null)" ]; then
+            echo "Fallback copy: copying all bin files."
+            cp -f *.bin /tmp/firmware_out/ 2>/dev/null || true
+            cp -f sha256sums /tmp/firmware_out/ 2>/dev/null || true
+        fi
         
-        # 仅针对最终有用的 sysupgrade 固件包生成清晰的哈希校验
-        sha256sum *sysupgrade.bin > sha256sums.txt
-        
-        echo "FIRMWARE_PATH=$PWD" >> $GITHUB_ENV
+        echo "FIRMWARE=/tmp/firmware_out" >> $GITHUB_ENV
         echo "status=success" >> $GITHUB_OUTPUT
 
-    - name: Upload Firmware to Artifacts
+    - name: Upload firmware directory to Artifacts
       uses: actions/upload-artifact@v4
-      if: steps.organize.outputs.status == 'success' && env.UPLOAD_FIRMWARE == 'true'
+      if: steps.organize.outputs.status == 'success' && !cancelled()
       with:
-        name: ImmortalWrt-C8-688-${{ env.BUILD_VER }}
-        path: |
-          ${{ env.FIRMWARE_PATH }}/*sysupgrade.bin
-          ${{ env.FIRMWARE_PATH }}/sha256sums.txt
-          ${{ env.FIRMWARE_PATH }}/version.txt
+        name: OpenWrt_firmware${{ env.DEVICE_NAME }}${{ env.FILE_DATE }}
+        path: ${{ env.FIRMWARE }}
 
-    - name: Create GitHub Release
+    - name: Generate release tag
+      id: tag
+      if: env.UPLOAD_RELEASE == 'true' && !cancelled()
+      run: |
+        echo "release_tag=ImmortalWrt-$(date +"%Y.%m.%d-%H%M")" >> $GITHUB_OUTPUT
+        touch release.txt
+        echo "🚀 Cudy TR3000 (512MB Flash) 专属固件发布" >> release.txt
+        echo "--------------------------------------------------" >> release.txt
+        echo "• 源码分支: VIKINGYFY/immortalwrt (owrt 25.x)" >> release.txt
+        echo "• 默认后台: 192.168.6.1" >> release.txt
+        echo "• 硬件分区: U-Boot 请选择 mod-490 布局" >> release.txt
+        echo "• 预置功能: 中兴 F50 免驱 / MTK PPE硬件加速 / OpenClash 25.x 运行环境 / 专属在线更新" >> release.txt
+        echo "status=success" >> $GITHUB_OUTPUT
+
+    - name: Upload firmware to release
       uses: softprops/action-gh-release@v2
-      if: steps.organize.outputs.status == 'success' && env.UPLOAD_RELEASE == 'true'
-      with:
-        tag_name: ${{ env.BUILD_VER }}
-        name: NRadio C8-688 固件版本 ${{ env.BUILD_VER }}
-        draft: false
-        prerelease: false
-        make_latest: true
-        body: |
-          ## NRadio C8-688 ImmortalWrt Master (Kernel 6.12) 固件发布
-          * 源码仓库: [AA9skillz-BN/nradio-c8-688-25.x](https://github.com/AA9skillz-BN/nradio-c8-688-25.x)
-          * 构建时间: ${{ env.BUILD_VER }}
-          * 默认管理后台: `192.168.66.1`
-          * 引导目标: 副系统 (System B: `kernel_2nd` + `rootfs_2nd`)
-          * Wi-Fi 名称: `NRadio-C8-688-2.4G` / `NRadio-C8-688-5G` (160MHz 满血)
-          * 加速状态: MTK PPE 硬件转发 + FullCone NAT + BBR 拥塞控制
-          * 支持在 LuCI 后台【系统】->【在线更新】进行 OTA 升级
-        files: |
-          ${{ env.FIRMWARE_PATH }}/*sysupgrade.bin
-          ${{ env.FIRMWARE_PATH }}/sha256sums.txt
-          ${{ env.FIRMWARE_PATH }}/version.txt
+      if: steps.tag.outputs.status == 'success' && !cancelled()
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        tag_name: ${{ steps.tag.outputs.release_tag }}
+        body_path: release.txt
+        files: ${{ env.FIRMWARE }}/*
 
-    # ================= 3. 自动清理历史 Release，仅保留最新 3 个 =================
-    - name: Delete Older Releases
+    - name: Delete older releases (保留最新 3 个)
       uses: dev-drprasad/delete-older-releases@v0.3.3
-      if: steps.organize.outputs.status == 'success' && env.UPLOAD_RELEASE == 'true'
+      if: steps.tag.outputs.status == 'success' && !cancelled()
+      continue-on-error: true
       with:
         keep_latest: 3
         delete_tags: true
