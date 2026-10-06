@@ -1,117 +1,244 @@
+
 #!/bin/bash
-#
-# Copyright (c) 2019-2020 P3TERX <https://p3terx.com>
-#
-# This is free software, licensed under the MIT License.
-# See /LICENSE for more information.
-#
-# https://github.com/P3TERX/Actions-OpenWrt
-# File name: diy-part2.sh
 # Description: OpenWrt DIY script part 2 (After Update feeds)
-#
 
-echo ">>> 开始执行 diy-part2.sh 自定义配置..."
+# 1. 修改默认后台 IP 为 192.168.6.1
+sed -i 's/192.168.1.1/192.168.6.1/g' package/base-files/files/bin/config_generate || true
 
-# -------------------------------------------------------------
-# 1. 基础系统与后台管理配置
-# -------------------------------------------------------------
-# 修改默认管理后台 IP 为 192.168.6.1（避开光猫与 F50 的 192.168.0.1 / 192.168.1.1）
-sed -i 's/192.168.1.1/192.168.6.1/g' package/base-files/files/bin/config_generate
-
-# 修改默认主机名
-sed -i 's/ImmortalWrt/Cudy-TR3000/g' package/base-files/files/bin/config_generate
-
-# 自定义版本与 Banner 描述
-BUILD_DATE=$(date +"%Y.%m.%d")
-sed -i "s/DISTRIB_DESCRIPTION='.*'/DISTRIB_DESCRIPTION='ImmortalWrt 25.x (TR3000 512M) Built ${BUILD_DATE}'/g" package/base-files/files/etc/openwrt_release
-
-# -------------------------------------------------------------
-# 2. 注入 Cudy TR3000 (512MB Flash) 专属设备树 (DTS)
-# -------------------------------------------------------------
+# 2. 复制 512MB 专属设备树 (DTS) 到内核 dts 目录
 DTS_SRC="$GITHUB_WORKSPACE/openwrt-mod/mt7981b-cudy-tr3000-512mb-v1.dts"
-DTS_DST="target/linux/mediatek/dts/mt7981b-cudy-tr3000-512mb-v1.dts"
 if [ -f "$DTS_SRC" ]; then
-    cp -f "$DTS_SRC" "$DTS_DST"
-    echo ">>> [OK] 成功注入 512MB 专属设备树: $DTS_DST"
-else
-    echo ">>> [WARNING] 未在 openwrt-mod/ 找到 DTS 文件，请检查路径！"
+    mkdir -p target/linux/mediatek/dts || true
+    cp -f "$DTS_SRC" target/linux/mediatek/dts/ || true
 fi
 
-# -------------------------------------------------------------
-# 3. 注入 filogic.mk 设备构建定义
-# -------------------------------------------------------------
+# 3. 精准注入对齐原参考仓库的机型定义 (防御性判断防止 set -e 退出)
 FILOGIC_MK="target/linux/mediatek/image/filogic.mk"
 if [ -f "$FILOGIC_MK" ]; then
     HAS_DEV=$(grep -c "cudy_tr3000-512mb-v1" "$FILOGIC_MK" || true)
     if [ "$HAS_DEV" -eq 0 ]; then
+        echo "Injecting cudy_tr3000-512mb-v1 definition into $FILOGIC_MK"
         cat << 'EOF' >> "$FILOGIC_MK"
 
 define Device/cudy_tr3000-512mb-v1
   DEVICE_VENDOR := Cudy
-  DEVICE_MODEL := TR3000 (512MB Flash)
+  DEVICE_MODEL := TR3000
+  DEVICE_VARIANT := 512mb v1
   DEVICE_DTS := mt7981b-cudy-tr3000-512mb-v1
-  DEVICE_PACKAGES := kmod-mt7981-firmware mt7981-wo-firmware
-  SUPPORTED_DEVICES += cudy,tr3000-512mb-v1 cudy,tr3000-512m cudy,tr3000
+  DEVICE_DTS_DIR := ../dts
+  SUPPORTED_DEVICES += R47 cudy,tr3000-v1
   UBINIZE_OPTS := -E 5
-  IMAGE_SIZE := 490MB
-  IMAGES += sysupgrade.bin
+  BLOCKSIZE := 128k
+  PAGESIZE := 2048
+  IMAGE_SIZE := 490M
+  KERNEL_IN_UBI := 1
   IMAGE/sysupgrade.bin := sysupgrade-tar | append-metadata
+  DEVICE_PACKAGES := kmod-usb3 kmod-mt7981-firmware mt7981-wo-firmware
 endef
 TARGET_DEVICES += cudy_tr3000-512mb-v1
 EOF
-        echo ">>> [OK] 成功追加 Device/cudy_tr3000-512mb-v1 到 $FILOGIC_MK"
-    else
-        echo ">>> [INFO] Device/cudy_tr3000-512mb-v1 已存在，跳过注入"
     fi
 fi
 
-# -------------------------------------------------------------
-# 4. 适配板级网络与升级白名单 (02_network & platform.sh)
-# -------------------------------------------------------------
-BOARD_NETWORK="target/linux/mediatek/filogic/base-files/etc/board.d/02_network"
-if [ -f "$BOARD_NETWORK" ]; then
-    if ! grep -q "cudy,tr3000-512mb-v1" "$BOARD_NETWORK"; then
-        sed -i 's/cudy,tr3000\\/cudy,tr3000* | \\\n\tcudy,tr3000-512mb-v1\\/g' "$BOARD_NETWORK" 2>/dev/null || true
-        echo ">>> [OK] 已将 cudy,tr3000-512mb-v1 加入 02_network 网口映射白名单"
-    fi
+# =========================================================
+# 4. 注入【固件升级】独立顶级菜单与在线升级脚本
+# =========================================================
+
+# A. 升级脚本
+mkdir -p package/base-files/files/usr/bin || true
+cat << 'EOF' > package/base-files/files/usr/bin/auto-update-firmware.sh
+#!/bin/sh
+
+REPO="AA9skillz-BN/tr3000-512-25"
+LOG_FILE="/tmp/firmware_update.log"
+
+exec > "$LOG_FILE" 2>&1
+
+echo "=========================================="
+echo "目标仓库: https://github.com/$REPO"
+echo "正在检测网络并连接 GitHub API..."
+echo "=========================================="
+
+API_URL="https://api.github.com/repos/$REPO/releases/latest"
+RELEASE_JSON=$(curl -sL "$API_URL")
+
+DOWNLOAD_URL=$(echo "$RELEASE_JSON" | grep -o 'https://[^" ]*cudy_tr3000-512mb-v1[^" ]*sysupgrade\.bin' | head -n 1)
+if [ -z "$DOWNLOAD_URL" ]; then
+    DOWNLOAD_URL=$(echo "$RELEASE_JSON" | grep -o 'https://[^" ]*sysupgrade\.bin' | head -n 1)
 fi
 
-BOARD_SYSUPGRADE="target/linux/mediatek/filogic/base-files/lib/upgrade/platform.sh"
-if [ -f "$BOARD_SYSUPGRADE" ]; then
-    if ! grep -q "cudy,tr3000-512mb-v1" "$BOARD_SYSUPGRADE"; then
-        sed -i 's/cudy,tr3000)/cudy,tr3000 | cudy,tr3000-512mb-v1)/g' "$BOARD_SYSUPGRADE" 2>/dev/null || true
-        echo ">>> [OK] 已将 cudy,tr3000-512mb-v1 加入 platform.sh 升级白名单"
-    fi
+TAG_NAME=$(echo "$RELEASE_JSON" | grep -o '"tag_name": *"[^"]*"' | head -n 1 | cut -d'"' -f4)
+
+if [ -z "$DOWNLOAD_URL" ]; then
+    echo "❌ 检查失败: 未能在最新 Release 中找到匹配的固件！"
+    exit 1
 fi
 
-# -------------------------------------------------------------
-# 5. 解决 mt76 对 mac80211 autoconf.h 依赖死锁补丁
-# -------------------------------------------------------------
+echo "✔ 发现最新可用版本: ${TAG_NAME:-最新发布}"
+echo "下载链接: $DOWNLOAD_URL"
+echo ""
+
+TMP_FILE="/tmp/firmware_upgrade.bin"
+rm -f "$TMP_FILE"
+
+echo "正在下载固件至内存缓存区 (请勿断电)..."
+curl -L -k -o "$TMP_FILE" "$DOWNLOAD_URL"
+
+if [ $? -ne 0 ] || [ ! -s "$TMP_FILE" ]; then
+    echo "❌ 固件下载失败，请检查路由器网络连接！"
+    rm -f "$TMP_FILE"
+    exit 1
+fi
+
+echo "✔ 固件下载完成，大小: $(ls -lh $TMP_FILE | awk '{print $5}')"
+echo ""
+
+echo "正在执行固件安全校验..."
+if ! sysupgrade -t "$TMP_FILE"; then
+    echo "❌ 固件校验不通过！可能文件损坏或型号不匹配，已终止升级以防止变砖。"
+    rm -f "$TMP_FILE"
+    exit 1
+fi
+
+echo "✔ 校验成功！将在 3 秒后执行自动刷机并重启..."
+echo "升级完成后管理地址仍为: 192.168.6.1。"
+echo "=========================================="
+
+sleep 3
+sysupgrade "$TMP_FILE"
+EOF
+chmod +x package/base-files/files/usr/bin/auto-update-firmware.sh || true
+
+# B. 注册独立顶级菜单
+mkdir -p package/base-files/files/usr/share/luci/menu.d || true
+cat << 'EOF' > package/base-files/files/usr/share/luci/menu.d/luci-app-autoupdate.json
+{
+	"admin/autoupdate": {
+		"title": "固件升级",
+		"order": 90,
+		"action": {
+			"type": "view",
+			"path": "autoupdate/index"
+		}
+	}
+}
+EOF
+
+# C. 权限控制 ACL
+mkdir -p package/base-files/files/usr/share/rpcd/acl.d || true
+cat << 'EOF' > package/base-files/files/usr/share/rpcd/acl.d/luci-app-autoupdate.json
+{
+	"luci-app-autoupdate": {
+		"description": "Grant access to autoupdate procedures",
+		"read": {
+			"file": {
+				"/tmp/firmware_update.log": [ "read" ]
+			}
+		},
+		"write": {
+			"file": {
+				"/usr/bin/auto-update-firmware.sh": [ "exec" ]
+			}
+		}
+	}
+}
+EOF
+
+# D. 交互前端 View
+mkdir -p package/base-files/files/www/luci-static/resources/view/autoupdate || true
+cat << 'EOF' > package/base-files/files/www/luci-static/resources/view/autoupdate/index.js
+'use strict';
+'require view';
+'require fs';
+'require ui';
+
+return view.extend({
+	load: function() {
+		return Promise.all([
+			fs.read_direct('/tmp/firmware_update.log').catch(function() { return ''; }),
+			fs.lines('/etc/openwrt_release').catch(function() { return []; })
+		]);
+	},
+
+	render: function(data) {
+		var logText = data[0] || '点击下方按钮，开始检查并拉取仓库最新发布的 25.x 固件...';
+
+		var viewDOM = E('div', { 'class': 'cbi-map' }, [
+			E('h2', {}, _('在线固件升级')),
+			E('div', { 'class': 'cbi-map-descr' }, _('一键拉取 AA9skillz-BN/tr3000-512-25 仓库最新 Release 固件，保留配置自动升级。')),
+
+			E('div', { 'class': 'cbi-section' }, [
+				E('div', { 'class': 'cbi-section-node' }, [
+					E('div', { 'class': 'cbi-value' }, [
+						E('label', { 'class': 'cbi-value-title' }, _('目标机型')),
+						E('div', { 'class': 'cbi-value-field' }, E('strong', {}, 'Cudy TR3000 (512MB Flash / mod-490)'))
+					]),
+					E('div', { 'class': 'cbi-value' }, [
+						E('label', { 'class': 'cbi-value-title' }, _('升级来源')),
+						E('div', { 'class': 'cbi-value-field' }, 'GitHub: AA9skillz-BN/tr3000-512-25 (Releases)')
+					])
+				])
+			]),
+
+			E('div', { 'class': 'cbi-section' }, [
+				E('h3', {}, _('操作面板')),
+				E('div', { 'class': 'cbi-section-node' }, [
+					E('div', { 'style': 'margin-bottom: 15px;' }, [
+						E('button', {
+							'class': 'cbi-button cbi-button-action important',
+							'click': function(ev) {
+								ev.target.disabled = true;
+								ui.showModal(_('正在处理'), [
+									E('p', { 'class': 'spinning' }, _('已启动在线升级进程，请观察下方控制台输出...'))
+								]);
+								setTimeout(function() { ui.hideModal(); }, 2500);
+
+								fs.exec('/usr/bin/auto-update-firmware.sh').then(function() {
+									ev.target.disabled = false;
+								});
+
+								var poll = window.setInterval(function() {
+									fs.read_direct('/tmp/firmware_update.log').then(function(res) {
+										var logArea = document.getElementById('update_log_area');
+										if (logArea && res) {
+											logArea.value = res;
+											logArea.scrollTop = logArea.scrollHeight;
+										}
+									});
+								}, 1500);
+							}
+						}, _('⚡ 立即检查并拉取最新固件升级'))
+					]),
+					E('textarea', {
+						'id': 'update_log_area',
+						'class': 'cbi-input-textarea',
+						'style': 'width: 100%; height: 240px; font-family: monospace; background: #181818; color: #00ff66; padding: 10px; border-radius: 6px; border: 1px solid #333;',
+						'readonly': 'readonly'
+					}, logText)
+				])
+			])
+		]);
+
+		return viewDOM;
+	},
+
+	handleSaveApply: null,
+	handleSave: null,
+	handleReset: null
+});
+EOF
+
+# =========================================================
+# 5. 解除 mt76 对 mac80211 autoconf.h 的时序强依赖检查
+# =========================================================
 if [ -f "package/kernel/mt76/Makefile" ]; then
-    sed -i 's|STAMP_CONFIGURED_DEPENDS :=.*|STAMP_CONFIGURED_DEPENDS :=|g' package/kernel/mt76/Makefile
-    echo ">>> [OK] 成功解除 mt76 对 autoconf.h 的时序锁 (STAMP_CONFIGURED_DEPENDS)"
+    sed -i 's|STAMP_CONFIGURED_DEPENDS :=.*|STAMP_CONFIGURED_DEPENDS :=|g' package/kernel/mt76/Makefile || true
 fi
 
-# -------------------------------------------------------------
-# 6. 预置 OpenClash Meta 核心与默认配置
-# -------------------------------------------------------------
-mkdir -p package/base-files/files/etc/openclash/core
-META_CORE_URL="https://raw.githubusercontent.com/vernesong/OpenClash/core/master/meta/clash-linux-arm64.tar.gz"
-echo ">>> 正在预下载 OpenClash Meta 核心..."
-curl -sL --connect-timeout 10 --retry 3 "$META_CORE_URL" -o /tmp/clash_meta.tar.gz || true
-if [ -s /tmp/clash_meta.tar.gz ]; then
-    tar -zxf /tmp/clash_meta.tar.gz -C package/base-files/files/etc/openclash/core/ 2>/dev/null || true
-    chmod +x package/base-files/files/etc/openclash/core/clash* 2>/dev/null || true
-    rm -f /tmp/clash_meta.tar.gz
-    echo ">>> [OK] OpenClash Meta 内核预装完毕"
-else
-    echo ">>> [WARNING] Meta 内核下载超时或失败，可开机后在 LuCI 页面下载"
-fi
-
-# -------------------------------------------------------------
-# 7. 预置中兴 F50 即插即用配置 (绑定 eth2)
-# -------------------------------------------------------------
-mkdir -p package/base-files/files/etc/uci-defaults
+# =========================================================
+# 6. 预置中兴 F50 专属即插即用接口 (锁定绑定至 eth2)
+# =========================================================
+mkdir -p package/base-files/files/etc/uci-defaults || true
 cat << 'EOF' > package/base-files/files/etc/uci-defaults/99-f50-hotplug
 uci set network.f50=interface
 uci set network.f50.proto='dhcp'
@@ -120,50 +247,9 @@ uci set network.f50.metric='20'
 uci commit network
 
 # 将 f50 接口加入防火墙 WAN 区域
-uci add_list firewall.@zone[1].network='f50'
+uci add_list firewall.@zone[1].network='f50' 2>/dev/null || true
 uci commit firewall
 EOF
-chmod +x package/base-files/files/etc/uci-defaults/99-f50-hotplug
+chmod +x package/base-files/files/etc/uci-defaults/99-f50-hotplug || true
 
-# -------------------------------------------------------------
-# 8. 专属终端一键在线更新脚本 (/bin/autoupdate)
-# -------------------------------------------------------------
-mkdir -p package/base-files/files/bin
-cat << 'EOF' > package/base-files/files/bin/autoupdate
-#!/bin/sh
-REPO_OWNER="AA9skillz-BN"
-REPO_NAME="tr3000-512-25"
-API_URL="https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/releases/latest"
-
-echo "=============================================="
-echo "      Cudy TR3000 512M 专属固件在线更新"
-echo "=============================================="
-
-echo ">>> 正在检查 GitHub Releases 最新版本..."
-DOWNLOAD_URL=$(curl -sL ${API_URL} | grep -o 'https://[^"]*cudy_tr3000-512mb-v1[^"]*sysupgrade\.bin' | head -n 1)
-
-if [ -z "$DOWNLOAD_URL" ]; then
-    DOWNLOAD_URL=$(curl -sL ${API_URL} | grep -o 'https://[^"]*sysupgrade\.bin' | head -n 1)
-fi
-
-if [ -z "$DOWNLOAD_URL" ]; then
-    echo "❌ 错误: 未能在最新 Release 中找到匹配的 sysupgrade 固件！"
-    exit 1
-fi
-
-echo ">>> 找到最新固件: ${DOWNLOAD_URL}"
-echo ">>> 开始下载到 /tmp/sysupgrade.bin ..."
-curl -L -o /tmp/sysupgrade.bin "$DOWNLOAD_URL"
-
-if [ ! -s /tmp/sysupgrade.bin ]; then
-    echo "❌ 固件下载失败或文件为空！"
-    exit 1
-fi
-
-echo ">>> 固件下载完成，开始执行系统升级 (保留配置)..."
-echo ">>> 请勿断电，设备将在 2 分钟内自动重启！"
-sysupgrade /tmp/sysupgrade.bin
-EOF
-chmod +x package/base-files/files/bin/autoupdate
-
-echo ">>> diy-part2.sh 执行完毕！"
+exit 0
