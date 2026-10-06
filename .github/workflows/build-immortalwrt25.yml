@@ -102,23 +102,14 @@ jobs:
         # 2. 编译交叉编译工具链
         make toolchain/compile -j$(nproc) || make toolchain/compile -j1 V=s
         
-        # 3. 编译内核与目标架构（生成 linux-xxx/.config 与基础头文件）
+        # 3. 编译内核与目标架构（生成 linux-xxx/.config 与核心头文件）
         make target/linux/compile -j$(nproc) || make target/linux/compile -j1 V=s
 
-        # 4. 优先编译无线核心包 mac80211（使用顶层包名）
-        make package/mac80211/compile -j$(nproc) || make package/mac80211/compile -j1 V=s || true
+        # 4. 必须先行真实编译 mac80211（补齐 /kernel/ 真实路径），生成真实的 autoconf.h 与 ieee80211 符号表
+        make package/kernel/mac80211/compile -j$(nproc) || make package/kernel/mac80211/compile -j1 V=s
 
-        # 5. 头文件安全兜底：确保 staging 目录下的 autoconf.h 真实落盘，彻底消除 mt76 缺失报错
-        STAGING_INC="staging_dir/target-aarch64_cortex-a53_musl/usr/include/mac80211-backport/backport"
-        mkdir -p "$STAGING_INC"
-        if [ ! -f "$STAGING_INC/autoconf.h" ]; then
-            SRC_CONF=$(find build_dir/ -name "autoconf.h" 2>/dev/null | grep -m1 "backport" || true)
-            if [ -n "$SRC_CONF" ]; then
-                cp -f "$SRC_CONF" "$STAGING_INC/autoconf.h"
-            else
-                touch "$STAGING_INC/autoconf.h"
-            fi
-        fi
+        # 5. 在 mac80211 真实就绪后，先行编译 mt76 驱动模块
+        make package/kernel/mt76/compile -j$(nproc) || make package/kernel/mt76/compile -j1 V=s
         
         # 6. 全量并发编译所有软件包与整机固件；遇冲突自动单线程带详细日志兜底
         make -j$(nproc) || make -j1 || make -j1 V=s
