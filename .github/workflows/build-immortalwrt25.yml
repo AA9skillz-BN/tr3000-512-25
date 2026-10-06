@@ -99,16 +99,19 @@ jobs:
         cd openwrt
         echo -e "$(nproc) thread compile"
         
-        # 1. 优先编译宿主机编译工具
+        # 1. 编译宿主机编译工具
         make tools/compile -j$(nproc) || make tools/compile -j1 V=s
         
         # 2. 编译交叉编译工具链
         make toolchain/compile -j$(nproc) || make toolchain/compile -j1 V=s
         
-        # 3. 编译内核与目标架构（生成 linux-xxx/.config 与基础内核头文件）
+        # 3. 编译内核与目标平台
         make target/linux/compile -j$(nproc) || make target/linux/compile -j1 V=s
 
-        # 4. 全量并发编译：交由 OpenWrt 官方依赖引擎调度，遇到冲突自动切单线程输出完整定位日志
+        # 4. 关键核心：显式 install mac80211，触发 Build/InstallDev，将 autoconf.h 真实落盘到 staging_dir
+        make package/kernel/mac80211/install -j$(nproc) || make package/kernel/mac80211/install -j1 V=s
+
+        # 5. 全量编译整机固件
         make -j$(nproc) || make -j1 || make -j1 V=s
         
         echo "status=success" >> $GITHUB_OUTPUT
@@ -122,7 +125,7 @@ jobs:
         mkdir -p /tmp/firmware_out
         cd openwrt/bin/targets/*/*
         
-        # 仅在编译成功后提取专属固件、sysupgrade 镜像与哈希校验表
+        # 提取专属固件、sysupgrade 镜像与哈希校验表
         cp -f *cudy_tr3000-512mb-v1*.bin /tmp/firmware_out/ 2>/dev/null || true
         cp -f *sysupgrade.bin /tmp/firmware_out/ 2>/dev/null || true
         cp -f sha256sums /tmp/firmware_out/ 2>/dev/null || true
