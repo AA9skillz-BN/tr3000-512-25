@@ -1,4 +1,3 @@
-
 #!/bin/bash
 # Description: OpenWrt DIY script part 2 (After Update feeds)
 
@@ -229,14 +228,7 @@ return view.extend({
 EOF
 
 # =========================================================
-# 5. 解除 mt76 对 mac80211 autoconf.h 的时序强依赖检查
-# =========================================================
-if [ -f "package/kernel/mt76/Makefile" ]; then
-    sed -i 's|STAMP_CONFIGURED_DEPENDS :=.*|STAMP_CONFIGURED_DEPENDS :=|g' package/kernel/mt76/Makefile || true
-fi
-
-# =========================================================
-# 6. 预置中兴 F50 专属即插即用接口 (锁定绑定至 eth2)
+# 5. 预置中兴 F50 专属即插即用接口 (锁定绑定至 eth2)
 # =========================================================
 mkdir -p package/base-files/files/etc/uci-defaults || true
 cat << 'EOF' > package/base-files/files/etc/uci-defaults/99-f50-hotplug
