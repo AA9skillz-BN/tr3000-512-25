@@ -102,13 +102,13 @@ jobs:
         # 2. 编译交叉编译工具链
         make toolchain/compile -j$(nproc) || make toolchain/compile -j1 V=s
         
-        # 3. 编译内核与目标架构（生成 linux-xxx/.config 与核心头文件）
+        # 3. 编译内核与目标架构（生成 linux-xxx/.config 与基础头文件）
         make target/linux/compile -j$(nproc) || make target/linux/compile -j1 V=s
 
-        # 4. 必须先行真实编译 mac80211（补齐 /kernel/ 真实路径），生成真实的 autoconf.h 与 ieee80211 符号表
+        # 4. 必须先行真实编译 mac80211（补齐 /kernel/ 真实路径），生成真实 autoconf.h 与 ieee80211 导出符号
         make package/kernel/mac80211/compile -j$(nproc) || make package/kernel/mac80211/compile -j1 V=s
 
-        # 5. 在 mac80211 真实就绪后，先行编译 mt76 驱动模块
+        # 5. 在 mac80211 核心与符号表真实就位后，编译 mt76 驱动模块
         make package/kernel/mt76/compile -j$(nproc) || make package/kernel/mt76/compile -j1 V=s
         
         # 6. 全量并发编译所有软件包与整机固件；遇冲突自动单线程带详细日志兜底
