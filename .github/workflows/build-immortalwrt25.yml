@@ -7,6 +7,9 @@ on:
     # 国际标准时间(UTC) 每周二 20:00 -> 即北京时间每周三凌晨 04:00 自动运行
     - cron: '0 20 * * 2'
 
+permissions:
+  contents: write
+
 env:
   REPO_URL: https://github.com/VIKINGYFY/immortalwrt.git
   REPO_BRANCH: owrt
@@ -102,13 +105,29 @@ jobs:
         # 2. 编译交叉编译工具链
         make toolchain/compile -j$(nproc) || make toolchain/compile -j1 V=s
         
-        # 3. 编译内核与目标架构（生成 linux-xxx/.config 与基础头文件）
+        # 3. 编译内核与目标架构（生成 linux-xxx/.config 与基础内核符号）
         make target/linux/compile -j$(nproc) || make target/linux/compile -j1 V=s
 
-        # 4. 必须先行真实编译 mac80211（补齐 /kernel/ 真实路径），生成真实 autoconf.h 与 ieee80211 导出符号
+        # 4. 真实编译 mac80211（在 build_dir 中产生真实 backports 头文件与 ieee80211 内核符号）
         make package/kernel/mac80211/compile -j$(nproc) || make package/kernel/mac80211/compile -j1 V=s
 
-        # 5. 在 mac80211 核心与符号表真实就位后，编译 mt76 驱动模块
+        # 4.1 核心修复：将 mac80211 刚刚生成的真实 backports 头文件同步到 staging_dir
+        STAGING_BP="staging_dir/target-aarch64_cortex-a53_musl/usr/include/mac80211-backport"
+        mkdir -p "$STAGING_BP/backport" "$STAGING_BP/uapi"
+        BP_DIR=$(find build_dir/ -type d -name "backports-*" 2>/dev/null | head -n 1)
+        if [ -n "$BP_DIR" ]; then
+            echo "Found mac80211 backports source at: $BP_DIR, syncing headers..."
+            [ -d "$BP_DIR/backport-include" ] && cp -rf "$BP_DIR/backport-include/"* "$STAGING_BP/" 2>/dev/null || true
+            [ -d "$BP_DIR/include/uapi" ] && cp -rf "$BP_DIR/include/uapi/"* "$STAGING_BP/uapi/" 2>/dev/null || true
+            [ -d "$BP_DIR/include/backport" ] && cp -rf "$BP_DIR/include/backport/"* "$STAGING_BP/backport/" 2>/dev/null || true
+        fi
+        # 兜底确保真实 autoconf.h 放置到位
+        if [ ! -f "$STAGING_BP/backport/autoconf.h" ]; then
+            REAL_CONF=$(find build_dir/ -name "autoconf.h" 2>/dev/null | grep -m1 "backport" || true)
+            [ -n "$REAL_CONF" ] && cp -f "$REAL_CONF" "$STAGING_BP/backport/autoconf.h"
+        fi
+
+        # 5. 在 mac80211 核心与真实头文件完全就绪后，先行编译 mt76 驱动模块
         make package/kernel/mt76/compile -j$(nproc) || make package/kernel/mt76/compile -j1 V=s
         
         # 6. 全量并发编译所有软件包与整机固件；遇冲突自动单线程带详细日志兜底
