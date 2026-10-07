@@ -4,24 +4,26 @@
 # 1. 修改默认后台 IP 为 192.168.6.1
 sed -i 's/192.168.1.1/192.168.6.1/g' package/base-files/files/bin/config_generate || true
 
-# 2. 复制 512MB 专属设备树 (DTS) 并对齐内核 6.18 路径
+# 2. 部署 512MB 设备树并修正上游 include 依赖
 DTS_SRC="$GITHUB_WORKSPACE/openwrt-mod/mt7981b-cudy-tr3000-512mb-v1.dts"
 if [ -f "$DTS_SRC" ]; then
+    # 建立目录并拷贝
     mkdir -p target/linux/mediatek/dts || true
-    cp -f "$DTS_SRC" target/linux/mediatek/dts/ || true
+    cp -f "$DTS_SRC" target/linux/mediatek/dts/mt7981b-cudy-tr3000-512mb-v1.dts
 
-    # 如果 DTS 中 include 了 mt7981b-cudy-tr3000.dts，检查上游是否存在 mt7981b-cudy-tr3000-v1.dts 并对齐
-    cd target/linux/mediatek/dts/
-    if [ ! -f "mt7981b-cudy-tr3000.dts" ]; then
-        MATCH_DTS=$(ls mt7981b-cudy-tr3000*.dts* 2>/dev/null | grep -v "512mb" | head -n 1)
-        if [ -n "$MATCH_DTS" ]; then
-            echo "Found base DTS: $MATCH_DTS, creating compatibility symlink..."
-            ln -sf "$MATCH_DTS" mt7981b-cudy-tr3000.dts
-            # 同时将 include 语法对齐目标文件名
-            sed -i "s/mt7981b-cudy-tr3000\.dts/$MATCH_DTS/g" mt7981b-cudy-tr3000-512mb-v1.dts || true
+    # 上游 25.x / 6.18 中基准设备树名称为 mt7981b-cudy-tr3000-v1.dts
+    # 将 include 行精准替换为上游存在的实际文件名
+    sed -i 's/"mt7981b-cudy-tr3000\.dts"/"mt7981b-cudy-tr3000-v1.dts"/g' target/linux/mediatek/dts/mt7981b-cudy-tr3000-512mb-v1.dts
+
+    # 兜底：在内核 arch 目录中建立别名兼容软链接（如果 target files 存在）
+    for dts_dir in target/linux/mediatek/files*/arch/arm64/boot/dts/mediatek; do
+        if [ -d "$dts_dir" ]; then
+            cp -f target/linux/mediatek/dts/mt7981b-cudy-tr3000-512mb-v1.dts "$dts_dir/" || true
+            if [ -f "$dts_dir/mt7981b-cudy-tr3000-v1.dts" ]; then
+                ln -sf "mt7981b-cudy-tr3000-v1.dts" "$dts_dir/mt7981b-cudy-tr3000.dts" || true
+            fi
         fi
-    fi
-    cd - >/dev/null
+    done
 fi
 
 # 3. 注入 512MB 机型定义 (IMAGE_SIZE := 490M)
