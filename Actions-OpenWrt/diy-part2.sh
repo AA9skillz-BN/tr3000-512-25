@@ -4,14 +4,14 @@
 # 1. 修改默认后台 IP 为 192.168.6.1
 sed -i 's/192.168.1.1/192.168.6.1/g' package/base-files/files/bin/config_generate || true
 
-# 2. 复制 512MB 专属设备树 (DTS) 到内核 dts 目录
+# 2. 部署 512MB 专属设备树 (DTS)
 DTS_SRC="$GITHUB_WORKSPACE/openwrt-mod/mt7981b-cudy-tr3000-512mb-v1.dts"
 if [ -f "$DTS_SRC" ]; then
     mkdir -p target/linux/mediatek/dts || true
-    cp -f "$DTS_SRC" target/linux/mediatek/dts/ || true
+    cp -f "$DTS_SRC" target/linux/mediatek/dts/mt7981b-cudy-tr3000-512mb-v1.dts
 fi
 
-# 3. 精准注入对齐原参考仓库的机型定义 (防御性判断防止 set -e 退出)
+# 3. 注入 512MB 机型定义 (IMAGE_SIZE 采用 502272k，规避 json_add_image_info.py 大写 M 解析报错)
 FILOGIC_MK="target/linux/mediatek/image/filogic.mk"
 if [ -f "$FILOGIC_MK" ]; then
     HAS_DEV=$(grep -c "cudy_tr3000-512mb-v1" "$FILOGIC_MK" || true)
@@ -29,7 +29,7 @@ define Device/cudy_tr3000-512mb-v1
   UBINIZE_OPTS := -E 5
   BLOCKSIZE := 128k
   PAGESIZE := 2048
-  IMAGE_SIZE := 490M
+  IMAGE_SIZE := 502272k
   KERNEL_IN_UBI := 1
   IMAGE/sysupgrade.bin := sysupgrade-tar | append-metadata
   DEVICE_PACKAGES := kmod-usb3 kmod-mt7981-firmware mt7981-wo-firmware
@@ -39,11 +39,7 @@ EOF
     fi
 fi
 
-# =========================================================
-# 4. 注入【固件升级】独立顶级菜单与在线升级脚本
-# =========================================================
-
-# A. 升级脚本
+# 4. 固件在线升级功能 (脚本、菜单、ACL 与 View)
 mkdir -p package/base-files/files/usr/bin || true
 cat << 'EOF' > package/base-files/files/usr/bin/auto-update-firmware.sh
 #!/bin/sh
@@ -108,7 +104,6 @@ sysupgrade "$TMP_FILE"
 EOF
 chmod +x package/base-files/files/usr/bin/auto-update-firmware.sh || true
 
-# B. 注册独立顶级菜单
 mkdir -p package/base-files/files/usr/share/luci/menu.d || true
 cat << 'EOF' > package/base-files/files/usr/share/luci/menu.d/luci-app-autoupdate.json
 {
@@ -123,7 +118,6 @@ cat << 'EOF' > package/base-files/files/usr/share/luci/menu.d/luci-app-autoupdat
 }
 EOF
 
-# C. 权限控制 ACL
 mkdir -p package/base-files/files/usr/share/rpcd/acl.d || true
 cat << 'EOF' > package/base-files/files/usr/share/rpcd/acl.d/luci-app-autoupdate.json
 {
@@ -143,7 +137,6 @@ cat << 'EOF' > package/base-files/files/usr/share/rpcd/acl.d/luci-app-autoupdate
 }
 EOF
 
-# D. 交互前端 View
 mkdir -p package/base-files/files/www/luci-static/resources/view/autoupdate || true
 cat << 'EOF' > package/base-files/files/www/luci-static/resources/view/autoupdate/index.js
 'use strict';
@@ -227,9 +220,7 @@ return view.extend({
 });
 EOF
 
-# =========================================================
-# 5. 预置中兴 F50 专属即插即用接口 (锁定绑定至 eth2)
-# =========================================================
+# 5. 预置中兴 F50 (eth2)
 mkdir -p package/base-files/files/etc/uci-defaults || true
 cat << 'EOF' > package/base-files/files/etc/uci-defaults/99-f50-hotplug
 uci set network.f50=interface
@@ -238,7 +229,6 @@ uci set network.f50.device='eth2'
 uci set network.f50.metric='20'
 uci commit network
 
-# 将 f50 接口加入防火墙 WAN 区域
 uci add_list firewall.@zone[1].network='f50' 2>/dev/null || true
 uci commit firewall
 EOF
