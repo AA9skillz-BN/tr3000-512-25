@@ -1,252 +1,185 @@
-#!/bin/bash
-# Description: OpenWrt DIY script part 2 (After Update feeds)
+name: Build ImmortalWrt (VIKINGYFY 25.x / 512M)
 
-# 1. 修改默认后台 IP 为 192.168.6.1
-sed -i 's/192.168.1.1/192.168.6.1/g' package/base-files/files/bin/config_generate || true
+on:
+  repository_dispatch:
+  workflow_dispatch:
+  schedule:
+    # 国际标准时间(UTC) 每周二 20:00 -> 即北京时间每周三凌晨 04:00 自动运行
+    - cron: '0 20 * * 2'
 
-# 2. 部署 512MB 设备树并修正上游 include 依赖
-DTS_SRC="$GITHUB_WORKSPACE/openwrt-mod/mt7981b-cudy-tr3000-512mb-v1.dts"
-if [ -f "$DTS_SRC" ]; then
-    # 建立目录并拷贝
-    mkdir -p target/linux/mediatek/dts || true
-    cp -f "$DTS_SRC" target/linux/mediatek/dts/mt7981b-cudy-tr3000-512mb-v1.dts
+permissions:
+  contents: write
 
-    # 上游 25.x / 6.18 中基准设备树名称为 mt7981b-cudy-tr3000-v1.dts
-    # 将 include 行精准替换为上游存在的实际文件名
-    sed -i 's/"mt7981b-cudy-tr3000\.dts"/"mt7981b-cudy-tr3000-v1.dts"/g' target/linux/mediatek/dts/mt7981b-cudy-tr3000-512mb-v1.dts
+env:
+  REPO_URL: https://github.com/VIKINGYFY/immortalwrt.git
+  REPO_BRANCH: owrt
+  FEEDS_CONF: Actions-OpenWrt/feeds.conf.default
+  CONFIG_FILE: openwrt-mod/.config
+  DIY_P1_SH: Actions-OpenWrt/diy-part1.sh
+  DIY_P2_SH: Actions-OpenWrt/diy-part2.sh
+  UPLOAD_BIN_DIR: false
+  UPLOAD_FIRMWARE: true
+  UPLOAD_RELEASE: true
+  TZ: Asia/Shanghai
 
-    # 兜底：在内核 arch 目录中建立别名兼容软链接（如果 target files 存在）
-    for dts_dir in target/linux/mediatek/files*/arch/arm64/boot/dts/mediatek; do
-        if [ -d "$dts_dir" ]; then
-            cp -f target/linux/mediatek/dts/mt7981b-cudy-tr3000-512mb-v1.dts "$dts_dir/" || true
-            if [ -f "$dts_dir/mt7981b-cudy-tr3000-v1.dts" ]; then
-                ln -sf "mt7981b-cudy-tr3000-v1.dts" "$dts_dir/mt7981b-cudy-tr3000.dts" || true
-            fi
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Initialization environment
+      env:
+        DEBIAN_FRONTEND: noninteractive
+      run: |
+        sudo rm -rf /etc/apt/sources.list.d/* /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+        sudo -E apt-get -qq update
+        sudo -E apt-get -qq install -y $(cat Actions-OpenWrt/depends.txt 2>/dev/null || echo "ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential bzip2 ccache cmake cpio curl device-tree-compiler fastjar flex gawk gettext gcc-multilib g++-multilib git gperf haveged help2man intltool libc6-dev-i386 libelf-dev libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev libreadline-dev libssl-dev libtool lrzsz mkisofs msmtp nano ninja-build p7zip p7zip-full patch pkgconf python3 python3-pip libpython3-dev qemu-utils rsync scons squashfs-tools subversion swig texinfo uglifyjs upx-ucl unzip vim wget xmlto xxd zlib1g-dev")
+        sudo -E apt-get -qq autoremove --purge
+        sudo -E apt-get -qq clean
+        sudo timedatectl set-timezone "$TZ"
+        sudo mkdir -p /workdir
+        sudo chown $USER:$GROUPS /workdir
+
+    - name: Clone source code
+      working-directory: /workdir
+      run: |
+        git clone $REPO_URL -b $REPO_BRANCH openwrt
+        ln -sf /workdir/openwrt $GITHUB_WORKSPACE/openwrt
+
+    - name: Load custom feeds
+      run: |
+        [ -e $FEEDS_CONF ] && cp $FEEDS_CONF openwrt/feeds.conf.default
+        chmod +x $DIY_P1_SH
+        cd openwrt
+        $GITHUB_WORKSPACE/$DIY_P1_SH || true
+
+    - name: Update feeds
+      run: cd openwrt && ./scripts/feeds update -a
+
+    - name: Install feeds
+      run: cd openwrt && ./scripts/feeds install -a
+
+    - name: Load custom configuration
+      run: |
+        chmod +x $DIY_P2_SH
+        cd openwrt
+        $GITHUB_WORKSPACE/$DIY_P2_SH || true
+
+        # 智能匹配 .config，规避 [ -e ] && 引发的 bash -e 误判退出
+        cd $GITHUB_WORKSPACE
+        if [ -f "$CONFIG_FILE" ]; then
+            echo "Found config at $CONFIG_FILE"
+            cp -f "$CONFIG_FILE" openwrt/.config
+        elif [ -f ".config" ]; then
+            echo "Found config at root .config"
+            cp -f ".config" openwrt/.config
         fi
-    done
-fi
+        exit 0
 
-# 3. 注入 512MB 机型定义 (IMAGE_SIZE := 490M)
-FILOGIC_MK="target/linux/mediatek/image/filogic.mk"
-if [ -f "$FILOGIC_MK" ]; then
-    HAS_DEV=$(grep -c "cudy_tr3000-512mb-v1" "$FILOGIC_MK" || true)
-    if [ "$HAS_DEV" -eq 0 ]; then
-        echo "Injecting cudy_tr3000-512mb-v1 definition into $FILOGIC_MK"
-        cat << 'EOF' >> "$FILOGIC_MK"
+    - name: Download package
+      id: package
+      run: |
+        cd openwrt
+        # 重置其他同芯片机型声明，确保只锁定 cudy_tr3000-512mb-v1
+        sed -i 's/CONFIG_TARGET_mediatek_filogic_DEVICE_.*=y/CONFIG_TARGET_mediatek_filogic_DEVICE_cudy_tr3000-512mb-v1=y/g' .config 2>/dev/null || true
+        echo "CONFIG_TARGET_mediatek=y" >> .config
+        echo "CONFIG_TARGET_mediatek_filogic=y" >> .config
+        echo "CONFIG_TARGET_mediatek_filogic_DEVICE_cudy_tr3000-512mb-v1=y" >> .config
 
-define Device/cudy_tr3000-512mb-v1
-  DEVICE_VENDOR := Cudy
-  DEVICE_MODEL := TR3000
-  DEVICE_VARIANT := 512mb v1
-  DEVICE_DTS := mt7981b-cudy-tr3000-512mb-v1
-  DEVICE_DTS_DIR := ../dts
-  SUPPORTED_DEVICES += R47 cudy,tr3000-v1
-  UBINIZE_OPTS := -E 5
-  BLOCKSIZE := 128k
-  PAGESIZE := 2048
-  IMAGE_SIZE := 490M
-  KERNEL_IN_UBI := 1
-  IMAGE/sysupgrade.bin := sysupgrade-tar | append-metadata
-  DEVICE_PACKAGES := kmod-usb3 kmod-mt7981-firmware mt7981-wo-firmware
-endef
-TARGET_DEVICES += cudy_tr3000-512mb-v1
-EOF
-    fi
-fi
+        # 核心依赖锁：强制激活无线协议栈与 MT7981 驱动，杜绝 defconfig 误跳过 mac80211
+        echo "CONFIG_PACKAGE_kmod-mac80211=y" >> .config
+        echo "CONFIG_PACKAGE_kmod-mt76-core=y" >> .config
+        echo "CONFIG_PACKAGE_kmod-mt76-connac=y" >> .config
+        echo "CONFIG_PACKAGE_kmod-mt7915e=y" >> .config
+        echo "CONFIG_PACKAGE_kmod-mt7981-firmware=y" >> .config
+        echo "CONFIG_PACKAGE_mt7981-wo-firmware=y" >> .config
 
-# 4. 固件在线升级功能 (脚本、菜单、ACL 与 View)
-mkdir -p package/base-files/files/usr/bin || true
-cat << 'EOF' > package/base-files/files/usr/bin/auto-update-firmware.sh
-#!/bin/sh
+        make defconfig
+        make download -j8
+        find dl -size -1024c -exec ls -l {} \;
+        find dl -size -1024c -exec rm -f {} \;
 
-REPO="AA9skillz-BN/tr3000-512-25"
-LOG_FILE="/tmp/firmware_update.log"
+    - name: Compile the firmware
+      id: compile
+      run: |
+        cd openwrt
+        echo -e "$(nproc) thread compile"
+        
+        # 1. 编译宿主机编译工具
+        make tools/compile -j$(nproc) || make tools/compile -j1 V=s
+        
+        # 2. 编译交叉编译工具链
+        make toolchain/compile -j$(nproc) || make toolchain/compile -j1 V=s
+        
+        # 3. 编译内核与目标平台
+        make target/linux/compile -j$(nproc) || make target/linux/compile -j1 V=s
 
-exec > "$LOG_FILE" 2>&1
+        # 4. 全量编译所有软件包（多核并发遇到冲突自动切单线程兜底）
+        make package/compile -j$(nproc) || make package/compile -j1 V=s
 
-echo "=========================================="
-echo "目标仓库: https://github.com/$REPO"
-echo "正在检测网络并连接 GitHub API..."
-echo "=========================================="
+        # 5. 生成最终系统固件镜像
+        make target/install -j$(nproc) || make target/install -j1 V=s
+        make package/index
+        
+        echo "status=success" >> $GITHUB_OUTPUT
+        echo "DEVICE_NAME=_cudy_tr3000-512mb-v1" >> $GITHUB_ENV
+        echo "FILE_DATE=_$(date +"%Y%m%d%H%M")" >> $GITHUB_ENV
 
-API_URL="https://api.github.com/repos/$REPO/releases/latest"
-RELEASE_JSON=$(curl -sL "$API_URL")
+    - name: Organize files
+      id: organize
+      if: steps.compile.outputs.status == 'success' && !cancelled()
+      run: |
+        mkdir -p /tmp/firmware_out
+        cd openwrt/bin/targets/*/*
+        
+        # 提取专属固件、sysupgrade 镜像与哈希校验表
+        cp -f *cudy_tr3000-512mb-v1*.bin /tmp/firmware_out/ 2>/dev/null || true
+        cp -f *sysupgrade.bin /tmp/firmware_out/ 2>/dev/null || true
+        cp -f sha256sums /tmp/firmware_out/ 2>/dev/null || true
+        
+        echo "FIRMWARE=/tmp/firmware_out" >> $GITHUB_ENV
+        echo "status=success" >> $GITHUB_OUTPUT
 
-DOWNLOAD_URL=$(echo "$RELEASE_JSON" | grep -o 'https://[^" ]*cudy_tr3000-512mb-v1[^" ]*sysupgrade\.bin' | head -n 1)
-if [ -z "$DOWNLOAD_URL" ]; then
-    DOWNLOAD_URL=$(echo "$RELEASE_JSON" | grep -o 'https://[^" ]*sysupgrade\.bin' | head -n 1)
-fi
+    - name: Upload firmware directory to Artifacts
+      uses: actions/upload-artifact@v4
+      if: steps.organize.outputs.status == 'success' && !cancelled()
+      with:
+        name: OpenWrt_firmware${{ env.DEVICE_NAME }}${{ env.FILE_DATE }}
+        path: ${{ env.FIRMWARE }}
 
-TAG_NAME=$(echo "$RELEASE_JSON" | grep -o '"tag_name": *"[^"]*"' | head -n 1 | cut -d'"' -f4)
+    - name: Generate release tag
+      id: tag
+      if: env.UPLOAD_RELEASE == 'true' && steps.compile.outputs.status == 'success' && !cancelled()
+      run: |
+        echo "release_tag=ImmortalWrt-$(date +"%Y.%m.%d-%H%M")" >> $GITHUB_OUTPUT
+        touch release.txt
+        echo "🚀 Cudy TR3000 (512MB Flash) 专属固件发布" >> release.txt
+        echo "--------------------------------------------------" >> release.txt
+        echo "• 源码分支: VIKINGYFY/immortalwrt (owrt 25.x)" >> release.txt
+        echo "• 默认后台: 192.168.6.1" >> release.txt
+        echo "• 硬件分区: U-Boot 请选择 mod-490 布局" >> release.txt
+        echo "• 预置功能: 中兴 F50 免驱即插即用 (eth2) / MTK PPE硬件加速 / OpenClash 25.x 运行环境 / 专属在线更新" >> release.txt
+        echo "status=success" >> $GITHUB_OUTPUT
 
-if [ -z "$DOWNLOAD_URL" ]; then
-    echo "❌ 检查失败: 未能在最新 Release 中找到匹配的固件！"
-    exit 1
-fi
+    - name: Upload firmware to release
+      uses: softprops/action-gh-release@v2
+      if: steps.tag.outputs.status == 'success' && !cancelled()
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        tag_name: ${{ steps.tag.outputs.release_tag }}
+        body_path: release.txt
+        files: ${{ env.FIRMWARE }}/*
 
-echo "✔ 发现最新可用版本: ${TAG_NAME:-最新发布}"
-echo "下载链接: $DOWNLOAD_URL"
-echo ""
-
-TMP_FILE="/tmp/firmware_upgrade.bin"
-rm -f "$TMP_FILE"
-
-echo "正在下载固件至内存缓存区 (请勿断电)..."
-curl -L -k -o "$TMP_FILE" "$DOWNLOAD_URL"
-
-if [ $? -ne 0 ] || [ ! -s "$TMP_FILE" ]; then
-    echo "❌ 固件下载失败，请检查路由器网络连接！"
-    rm -f "$TMP_FILE"
-    exit 1
-fi
-
-echo "✔ 固件下载完成，大小: $(ls -lh $TMP_FILE | awk '{print $5}')"
-echo ""
-
-echo "正在执行固件安全校验..."
-if ! sysupgrade -t "$TMP_FILE"; then
-    echo "❌ 固件校验不通过！可能文件损坏或型号不匹配，已终止升级以防止变砖。"
-    rm -f "$TMP_FILE"
-    exit 1
-fi
-
-echo "✔ 校验成功！将在 3 秒后执行自动刷机并重启..."
-echo "升级完成后管理地址仍为: 192.168.6.1。"
-echo "=========================================="
-
-sleep 3
-sysupgrade "$TMP_FILE"
-EOF
-chmod +x package/base-files/files/usr/bin/auto-update-firmware.sh || true
-
-mkdir -p package/base-files/files/usr/share/luci/menu.d || true
-cat << 'EOF' > package/base-files/files/usr/share/luci/menu.d/luci-app-autoupdate.json
-{
-	"admin/autoupdate": {
-		"title": "固件升级",
-		"order": 90,
-		"action": {
-			"type": "view",
-			"path": "autoupdate/index"
-		}
-	}
-}
-EOF
-
-mkdir -p package/base-files/files/usr/share/rpcd/acl.d || true
-cat << 'EOF' > package/base-files/files/usr/share/rpcd/acl.d/luci-app-autoupdate.json
-{
-	"luci-app-autoupdate": {
-		"description": "Grant access to autoupdate procedures",
-		"read": {
-			"file": {
-				"/tmp/firmware_update.log": [ "read" ]
-			}
-		},
-		"write": {
-			"file": {
-				"/usr/bin/auto-update-firmware.sh": [ "exec" ]
-			}
-		}
-	}
-}
-EOF
-
-mkdir -p package/base-files/files/www/luci-static/resources/view/autoupdate || true
-cat << 'EOF' > package/base-files/files/www/luci-static/resources/view/autoupdate/index.js
-'use strict';
-'require view';
-'require fs';
-'require ui';
-
-return view.extend({
-	load: function() {
-		return Promise.all([
-			fs.read_direct('/tmp/firmware_update.log').catch(function() { return ''; }),
-			fs.lines('/etc/openwrt_release').catch(function() { return []; })
-		]);
-	},
-
-	render: function(data) {
-		var logText = data[0] || '点击下方按钮，开始检查并拉取仓库最新发布的 25.x 固件...';
-
-		var viewDOM = E('div', { 'class': 'cbi-map' }, [
-			E('h2', {}, _('在线固件升级')),
-			E('div', { 'class': 'cbi-map-descr' }, _('一键拉取 AA9skillz-BN/tr3000-512-25 仓库最新 Release 固件，保留配置自动升级。')),
-
-			E('div', { 'class': 'cbi-section' }, [
-				E('div', { 'class': 'cbi-section-node' }, [
-					E('div', { 'class': 'cbi-value' }, [
-						E('label', { 'class': 'cbi-value-title' }, _('目标机型')),
-						E('div', { 'class': 'cbi-value-field' }, E('strong', {}, 'Cudy TR3000 (512MB Flash / mod-490)'))
-					]),
-					E('div', { 'class': 'cbi-value' }, [
-						E('label', { 'class': 'cbi-value-title' }, _('升级来源')),
-						E('div', { 'class': 'cbi-value-field' }, 'GitHub: AA9skillz-BN/tr3000-512-25 (Releases)')
-					])
-				])
-			]),
-
-			E('div', { 'class': 'cbi-section' }, [
-				E('h3', {}, _('操作面板')),
-				E('div', { 'class': 'cbi-section-node' }, [
-					E('div', { 'style': 'margin-bottom: 15px;' }, [
-						E('button', {
-							'class': 'cbi-button cbi-button-action important',
-							'click': function(ev) {
-								ev.target.disabled = true;
-								ui.showModal(_('正在处理'), [
-									E('p', { 'class': 'spinning' }, _('已启动在线升级进程，请观察下方控制台输出...'))
-								]);
-								setTimeout(function() { ui.hideModal(); }, 2500);
-
-								fs.exec('/usr/bin/auto-update-firmware.sh').then(function() {
-									ev.target.disabled = false;
-								});
-
-								var poll = window.setInterval(function() {
-									fs.read_direct('/tmp/firmware_update.log').then(function(res) {
-										var logArea = document.getElementById('update_log_area');
-										if (logArea && res) {
-											logArea.value = res;
-											logArea.scrollTop = logArea.scrollHeight;
-										}
-									});
-								}, 1500);
-							}
-						}, _('⚡ 立即检查并拉取最新固件升级'))
-					]),
-					E('textarea', {
-						'id': 'update_log_area',
-						'class': 'cbi-input-textarea',
-						'style': 'width: 100%; height: 240px; font-family: monospace; background: #181818; color: #00ff66; padding: 10px; border-radius: 6px; border: 1px solid #333;',
-						'readonly': 'readonly'
-					}, logText)
-				])
-			])
-		]);
-
-		return viewDOM;
-	},
-
-	handleSaveApply: null,
-	handleSave: null,
-	handleReset: null
-});
-EOF
-
-# 5. 预置中兴 F50 (eth2)
-mkdir -p package/base-files/files/etc/uci-defaults || true
-cat << 'EOF' > package/base-files/files/etc/uci-defaults/99-f50-hotplug
-uci set network.f50=interface
-uci set network.f50.proto='dhcp'
-uci set network.f50.device='eth2'
-uci set network.f50.metric='20'
-uci commit network
-
-uci add_list firewall.@zone[1].network='f50' 2>/dev/null || true
-uci commit firewall
-EOF
-chmod +x package/base-files/files/etc/uci-defaults/99-f50-hotplug || true
-
-exit 0
+    - name: Delete older releases (保留最新 3 个)
+      uses: dev-drprasad/delete-older-releases@v0.3.3
+      if: steps.tag.outputs.status == 'success' && !cancelled()
+      continue-on-error: true
+      with:
+        keep_latest: 3
+        delete_tags: true
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
