@@ -4,8 +4,9 @@ on:
   repository_dispatch:
   workflow_dispatch:
   schedule:
-    # 国际标准时间(UTC) 每周二 20:00 -> 即北京时间每周三凌晨 04:00 自动运行
-    - cron: '0 20 * * 2'
+    # 国际标准时间(UTC) 每周一 19:00 -> 即北京时间每周二凌晨 03:00 自动触发编译
+    - cron: '0 19 * * 1'
+    
 
 permissions:
   contents: write
