@@ -88,6 +88,15 @@ jobs:
         echo "CONFIG_TARGET_mediatek=y" >> .config
         echo "CONFIG_TARGET_mediatek_filogic=y" >> .config
         echo "CONFIG_TARGET_mediatek_filogic_DEVICE_cudy_tr3000-512mb-v1=y" >> .config
+
+        # 核心依赖锁：强制激活无线协议栈与 MT7981 驱动，杜绝 defconfig 误跳过 mac80211
+        echo "CONFIG_PACKAGE_kmod-mac80211=y" >> .config
+        echo "CONFIG_PACKAGE_kmod-mt76-core=y" >> .config
+        echo "CONFIG_PACKAGE_kmod-mt76-connac=y" >> .config
+        echo "CONFIG_PACKAGE_kmod-mt7915e=y" >> .config
+        echo "CONFIG_PACKAGE_kmod-mt7981-firmware=y" >> .config
+        echo "CONFIG_PACKAGE_mt7981-wo-firmware=y" >> .config
+
         make defconfig
         make download -j8
         find dl -size -1024c -exec ls -l {} \;
@@ -108,7 +117,7 @@ jobs:
         # 3. 编译内核与目标平台
         make target/linux/compile -j$(nproc) || make target/linux/compile -j1 V=s
 
-        # 4. 全量编译所有软件包（如果多核并发冲突则自动单线程兜底）
+        # 4. 全量编译所有软件包（多核并发遇到冲突自动切单线程兜底）
         make package/compile -j$(nproc) || make package/compile -j1 V=s
 
         # 5. 生成最终系统固件镜像
