@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: (GPL-2.0 OR MIT)
 
 /dts-v1/;
-#include "mt7981b-cudy-tr3000.dts"
+#include "mt7981b-cudy-tr3000-v1.dts"
 
 / {
 	model = "Cudy TR3000 (512MB Flash)";
