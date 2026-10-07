@@ -68,7 +68,7 @@ jobs:
         cd openwrt
         $GITHUB_WORKSPACE/$DIY_P2_SH || true
 
-        # 智能匹配 .config，规避 [ -e ] && 引发的 bash -e 误判退出
+        # 匹配配置源文件
         cd $GITHUB_WORKSPACE
         if [ -f "$CONFIG_FILE" ]; then
             echo "Found config at $CONFIG_FILE"
@@ -108,21 +108,12 @@ jobs:
         cd openwrt
         echo -e "$(nproc) thread compile"
         
-        # 1. 编译宿主机编译工具
+        # 1. 预先构建 Host 工具与交叉编译工具链
         make tools/compile -j$(nproc) || make tools/compile -j1 V=s
-        
-        # 2. 编译交叉编译工具链
         make toolchain/compile -j$(nproc) || make toolchain/compile -j1 V=s
-        
-        # 3. 编译内核与目标平台
-        make target/linux/compile -j$(nproc) || make target/linux/compile -j1 V=s
 
-        # 4. 全量编译所有软件包（多核并发遇到冲突自动切单线程兜底）
-        make package/compile -j$(nproc) || make package/compile -j1 V=s
-
-        # 5. 生成最终系统固件镜像
-        make target/install -j$(nproc) || make target/install -j1 V=s
-        make package/index
+        # 2. 顶层统管全流程构建（自动完成内核编译、apk打包索引、rootfs构建与最终固件打包）
+        make -j$(nproc) || make -j1 V=s
         
         echo "status=success" >> $GITHUB_OUTPUT
         echo "DEVICE_NAME=_cudy_tr3000-512mb-v1" >> $GITHUB_ENV
