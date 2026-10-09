@@ -138,7 +138,7 @@ log "✔ 安全校验通过！系统即将在 3 秒后执行写入并重启..."
 log "提示: 升级过程中千万不要断电，完成后访问 192.168.6.1"
 log "=========================================="
 
-# 杀掉大内存后台应用（如 OpenClash）确保刷机时内存充足
+# 杀掉大内存后台应用确保刷机时内存充足
 /etc/init.d/openclash stop 2>/dev/null || true
 sync
 echo 3 > /proc/sys/vm/drop_caches
@@ -271,14 +271,12 @@ EOF
 # 8. 预置中兴 F50 免驱支持（精准查找 wan 区域名称，不依赖写死下标）
 mkdir -p package/base-files/files/etc/uci-defaults || true
 cat << 'EOF' > package/base-files/files/etc/uci-defaults/99-f50-hotplug
-# 1. 静态网络接口初始化 (备选绑定 eth2/usb0，默认设备设为 eth2)
 uci set network.f50=interface
 uci set network.f50.proto='dhcp'
 uci set network.f50.device='eth2'
 uci set network.f50.metric='20'
 uci commit network
 
-# 2. 遍历查找 wan 区域名称，杜绝使用 @zone[1] 导致位置错乱
 for i in $(seq 0 10); do
     ZNAME=$(uci -q get firewall.@zone[$i].name)
     if [ "$ZNAME" = "wan" ]; then
@@ -292,12 +290,11 @@ exit 0
 EOF
 chmod +x package/base-files/files/etc/uci-defaults/99-f50-hotplug || true
 
-# 9. 部署 USB 动态热插拔规则（自动适配 eth2 / usb0 驱动名变动）
+# 9. 部署 USB 动态热插拔规则（引入 2 秒 Link-Up 缓冲，防止 DHCP 超时丢包）
 mkdir -p package/base-files/files/etc/hotplug.d/net || true
 cat << 'EOF' > package/base-files/files/etc/hotplug.d/net/99-f50-auto
 case "$ACTION" in
     add)
-        # 如果检测到新插入的网卡是 usb0 或 eth2，自动接管并重连 f50 接口
         if [ "$INTERFACE" = "usb0" ] || [ "$INTERFACE" = "eth2" ]; then
             CURRENT_DEV=$(uci -q get network.f50.device)
             if [ "$CURRENT_DEV" != "$INTERFACE" ]; then
@@ -305,7 +302,7 @@ case "$ACTION" in
                 uci commit network
                 /etc/init.d/network reload
             fi
-            ifup f50
+            ( sleep 2 && ifup f50 ) &
         fi
         ;;
 esac
@@ -318,5 +315,20 @@ cat << 'EOF' >> package/base-files/files/etc/sysupgrade.conf
 /etc/openclash/
 /usr/bin/auto-update-firmware.sh
 EOF
+
+# 11. 改进项 3: 系统时区与高可用国内 NTP 校准（解决无 RTC 硬件时钟偏差与 TLS 证书死锁）
+mkdir -p package/base-files/files/etc/uci-defaults || true
+cat << 'EOF' > package/base-files/files/etc/uci-defaults/99-timesync
+uci set system.@system[0].zonename='Asia/Shanghai'
+uci set system.@system[0].timezone='CST-8'
+uci -q delete system.ntp.server
+uci add_list system.ntp.server='ntp.aliyun.com'
+uci add_list system.ntp.server='time1.cloud.tencent.com'
+uci add_list system.ntp.server='cn.pool.ntp.org'
+uci add_list system.ntp.server='pool.ntp.org'
+uci commit system
+exit 0
+EOF
+chmod +x package/base-files/files/etc/uci-defaults/99-timesync || true
 
 exit 0
