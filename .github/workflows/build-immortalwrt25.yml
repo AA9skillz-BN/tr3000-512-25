@@ -6,7 +6,6 @@ on:
   schedule:
     # 国际标准时间(UTC) 每周一 19:00 -> 即北京时间每周二凌晨 03:00 自动触发编译
     - cron: '0 19 * * 1'
-    
 
 permissions:
   contents: write
@@ -84,13 +83,13 @@ jobs:
       id: package
       run: |
         cd openwrt
-        # 重置其他同芯片机型声明，确保只锁定 cudy_tr3000-512mb-v1
+        # 严格锁定编译目标为 cudy_tr3000-512mb-v1
         sed -i 's/CONFIG_TARGET_mediatek_filogic_DEVICE_.*=y/CONFIG_TARGET_mediatek_filogic_DEVICE_cudy_tr3000-512mb-v1=y/g' .config 2>/dev/null || true
         echo "CONFIG_TARGET_mediatek=y" >> .config
         echo "CONFIG_TARGET_mediatek_filogic=y" >> .config
         echo "CONFIG_TARGET_mediatek_filogic_DEVICE_cudy_tr3000-512mb-v1=y" >> .config
 
-        # 核心依赖锁：强制激活无线协议栈与 MT7981 驱动，杜绝 defconfig 误跳过 mac80211
+        # 依赖锁：强制激活无线协议栈与 MT7981 驱动，避免 defconfig 自动去除
         echo "CONFIG_PACKAGE_kmod-mac80211=y" >> .config
         echo "CONFIG_PACKAGE_kmod-mt76-core=y" >> .config
         echo "CONFIG_PACKAGE_kmod-mt76-connac=y" >> .config
@@ -113,7 +112,7 @@ jobs:
         make tools/compile -j$(nproc) || make tools/compile -j1 V=s
         make toolchain/compile -j$(nproc) || make toolchain/compile -j1 V=s
 
-        # 2. 顶层统管全流程构建（自动完成内核编译、apk打包索引、rootfs构建与最终固件打包）
+        # 2. 顶层统管全流程构建 (原生适配 25.x apk 索引、rootfs 部署与固件生成)
         make -j$(nproc) || make -j1 V=s
         
         echo "status=success" >> $GITHUB_OUTPUT
@@ -127,7 +126,7 @@ jobs:
         mkdir -p /tmp/firmware_out
         cd openwrt/bin/targets/*/*
         
-        # 提取专属固件、sysupgrade 镜像与哈希校验表
+        # 提取目标机型专属固件、sysupgrade 镜像及 sha256 校验文件
         cp -f *cudy_tr3000-512mb-v1*.bin /tmp/firmware_out/ 2>/dev/null || true
         cp -f *sysupgrade.bin /tmp/firmware_out/ 2>/dev/null || true
         cp -f sha256sums /tmp/firmware_out/ 2>/dev/null || true
@@ -150,10 +149,10 @@ jobs:
         touch release.txt
         echo "🚀 Cudy TR3000 (512MB Flash) 专属固件发布" >> release.txt
         echo "--------------------------------------------------" >> release.txt
-        echo "• 源码分支: VIKINGYFY/immortalwrt (owrt 25.x)" >> release.txt
+        echo "• 源码分支: VIKINGYFY/immortalwrt (owrt 25.x / Linux 6.18)" >> release.txt
         echo "• 默认后台: 192.168.6.1" >> release.txt
         echo "• 硬件分区: U-Boot 请选择 mod-490 布局" >> release.txt
-        echo "• 预置功能: 中兴 F50 免驱即插即用 (eth2) / MTK PPE硬件加速 / OpenClash 25.x 运行环境 / 专属在线更新" >> release.txt
+        echo "• 预置功能: 中兴 F50 5G 即插即用 / MTK 硬件流量分载 / OpenClash 25.x 运行栈 / 安全校验在线升级" >> release.txt
         echo "status=success" >> $GITHUB_OUTPUT
 
     - name: Upload firmware to release
