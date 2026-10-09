@@ -184,7 +184,7 @@ cat << 'EOF' > package/base-files/files/usr/share/rpcd/acl.d/luci-app-autoupdate
 }
 EOF
 
-# 7. 部署 LuCI 视图 (JavaScript 现代化客户端页面)
+# 7. 部署 LuCI 视图 (现代化动效升级控制台)
 mkdir -p package/base-files/files/www/luci-static/resources/view/autoupdate || true
 cat << 'EOF' > package/base-files/files/www/luci-static/resources/view/autoupdate/index.js
 'use strict';
@@ -201,9 +201,39 @@ return view.extend({
 	},
 
 	render: function(data) {
-		var logText = data[0] || '点击下方按钮，开始检查并拉取仓库最新发布的 25.x 固件...';
+		var logText = data[0] || '等待操作：点击下方按钮开始检查并同步最新构建...';
+
+		var styleNode = E('style', {}, [
+			'@keyframes pulse-bar { 0% { background-position: 0% 50%; } 50% { background-position: 100% 50%; } 100% { background-position: 0% 50%; } }',
+			'@keyframes blink-dot { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: 0.4; transform: scale(0.85); } }',
+			'.ota-progress-container { width: 100%; background: #222; border-radius: 8px; height: 12px; overflow: hidden; margin: 15px 0; display: none; border: 1px solid #444; }',
+			'.ota-progress-bar { width: 100%; height: 100%; background: linear-gradient(90deg, #00c6ff, #0072ff, #00ff87, #60efff); background-size: 300% 300%; animation: pulse-bar 2s ease infinite; }',
+			'.ota-badge { display: inline-flex; align-items: center; padding: 4px 10px; border-radius: 20px; font-size: 12px; margin-right: 10px; background: #2a2a2a; border: 1px solid #444; }',
+			'.ota-dot { width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }',
+			'.ota-dot.active { animation: blink-dot 1s infinite; }',
+			'.dot-idle { background: #888; }',
+			'.dot-down { background: #00b4d8; }',
+			'.dot-check { background: #ffb703; }',
+			'.dot-flash { background: #ef233c; }'
+		]);
+
+		var progressBar = E('div', { 'class': 'ota-progress-container', 'id': 'ota_progress' }, [
+			E('div', { 'class': 'ota-progress-bar' })
+		]);
+
+		var statusBadges = E('div', { 'style': 'margin-bottom: 12px; display: flex; flex-wrap: wrap; gap: 8px;' }, [
+			E('span', { 'class': 'ota-badge', 'id': 'badge_status' }, [
+				E('span', { 'class': 'ota-dot dot-idle', 'id': 'dot_status' }),
+				E('span', { 'id': 'text_status' }, _('待机中'))
+			]),
+			E('span', { 'class': 'ota-badge' }, [
+				E('strong', { 'style': 'color: #00ff87;' }, 'MT7981B'),
+				' (512MB / mod-490)'
+			])
+		]);
 
 		var viewDOM = E('div', { 'class': 'cbi-map' }, [
+			styleNode,
 			E('h2', {}, _('在线固件升级')),
 			E('div', { 'class': 'cbi-map-descr' }, _('一键拉取 AA9skillz-BN/tr3000-512-25 仓库最新 Release 固件，自动进行安全校验并保留配置升级。')),
 
@@ -211,31 +241,38 @@ return view.extend({
 				E('div', { 'class': 'cbi-section-node' }, [
 					E('div', { 'class': 'cbi-value' }, [
 						E('label', { 'class': 'cbi-value-title' }, _('目标机型')),
-						E('div', { 'class': 'cbi-value-field' }, E('strong', {}, 'Cudy TR3000 (512MB Flash / mod-490)'))
+						E('div', { 'class': 'cbi-value-field' }, E('strong', {}, 'Cudy TR3000 (512MB Flash)'))
 					]),
 					E('div', { 'class': 'cbi-value' }, [
-						E('label', { 'class': 'cbi-value-title' }, _('升级来源')),
-						E('div', { 'class': 'cbi-value-field' }, 'GitHub: AA9skillz-BN/tr3000-512-25 (Releases)')
+						E('label', { 'class': 'cbi-value-title' }, _('更新通道')),
+						E('div', { 'class': 'cbi-value-field' }, 'GitHub Releases (owrt 25.x 自动化构建)')
 					])
 				])
 			]),
 
 			E('div', { 'class': 'cbi-section' }, [
-				E('h3', {}, _('操作面板')),
+				E('h3', {}, _('升级控制台')),
 				E('div', { 'class': 'cbi-section-node' }, [
+					statusBadges,
 					E('div', { 'style': 'margin-bottom: 15px;' }, [
 						E('button', {
+							'id': 'btn_start_update',
 							'class': 'cbi-button cbi-button-action important',
 							'click': function(ev) {
 								ev.target.disabled = true;
-								ui.showModal(_('正在处理'), [
-									E('p', { 'class': 'spinning' }, _('已启动在线升级进程，请观察下方控制台输出...'))
-								]);
-								setTimeout(function() { ui.hideModal(); }, 2500);
+								document.getElementById('ota_progress').style.display = 'block';
+								
+								var dot = document.getElementById('dot_status');
+								var txt = document.getElementById('text_status');
+								dot.className = 'ota-dot dot-down active';
+								txt.innerText = '正在连接云端并拉取固件...';
 
-								fs.exec('/usr/bin/auto-update-firmware.sh').then(function() {
-									ev.target.disabled = false;
-								});
+								ui.showModal(_('正在处理'), [
+									E('p', { 'class': 'spinning' }, _('OTA 升级程序已启动，请关注下方动态进度条与实时输出...'))
+								]);
+								setTimeout(function() { ui.hideModal(); }, 2000);
+
+								fs.exec('/usr/bin/auto-update-firmware.sh');
 
 								var poll = window.setInterval(function() {
 									fs.read_direct('/tmp/firmware_update.log').then(function(res) {
@@ -243,16 +280,34 @@ return view.extend({
 										if (logArea && res) {
 											logArea.value = res;
 											logArea.scrollTop = logArea.scrollHeight;
+
+											if (res.indexOf('SHA256 完整性比对') !== -1) {
+												dot.className = 'ota-dot dot-check active';
+												txt.innerText = '正在校验固件哈希一致性...';
+											}
+											if (res.indexOf('安全校验通过') !== -1 || res.indexOf('执行写入') !== -1) {
+												dot.className = 'ota-dot dot-flash active';
+												txt.innerText = '⚠️ 正在刷入闪存并重启，请勿断电！';
+												document.getElementById('btn_start_update').innerText = '正在写入闪存中...';
+											}
+											if (res.indexOf('❌') !== -1) {
+												dot.className = 'ota-dot dot-flash';
+												txt.innerText = '升级失败，已安全终止';
+												document.getElementById('ota_progress').style.display = 'none';
+												document.getElementById('btn_start_update').disabled = false;
+												window.clearInterval(poll);
+											}
 										}
 									});
-								}, 1500);
+								}, 1200);
 							}
-						}, _('⚡ 立即检查并拉取最新固件升级'))
+						}, _('⚡ 立即拉取并在线升级'))
 					]),
+					progressBar,
 					E('textarea', {
 						'id': 'update_log_area',
 						'class': 'cbi-input-textarea',
-						'style': 'width: 100%; height: 260px; font-family: monospace; background: #181818; color: #00ff66; padding: 10px; border-radius: 6px; border: 1px solid #333;',
+						'style': 'width: 100%; height: 280px; font-family: monospace; background: #121212; color: #00ff87; padding: 12px; border-radius: 6px; border: 1px solid #333; line-height: 1.4;',
 						'readonly': 'readonly'
 					}, logText)
 				])
@@ -316,7 +371,7 @@ cat << 'EOF' >> package/base-files/files/etc/sysupgrade.conf
 /usr/bin/auto-update-firmware.sh
 EOF
 
-# 11. 改进项 3: 系统时区与高可用国内 NTP 校准（解决无 RTC 硬件时钟偏差与 TLS 证书死锁）
+# 11. 系统时区与高可用国内 NTP 校准（解决无 RTC 硬件时钟偏差与 TLS 证书死锁）
 mkdir -p package/base-files/files/etc/uci-defaults || true
 cat << 'EOF' > package/base-files/files/etc/uci-defaults/99-timesync
 uci set system.@system[0].zonename='Asia/Shanghai'
