@@ -473,56 +473,94 @@ EOF
 chmod +x package/base-files/files/etc/uci-defaults/99-f50-watchdog-cron || true
 
 # ==============================================================================
-# 14. 注入标准兼容版 CPE-MYOS 深度美化层 (防崩/幂等防护强化)
+# 14. 注入标准兼容版 CPE-MYOS 深度美化层 (手机端响应式 + 局部作用域 + 编译期固化)
 # ==============================================================================
-# 1. 注入独立美化样式表
+
+# 1. 编译期直接部署独立样式表 (Scoped 样式，不污染内部表单控件；支持移动端适配)
 mkdir -p package/base-files/files/www/luci-static/resources || true
 cat << 'EOF' > package/base-files/files/www/luci-static/resources/cpe_myos_override.css
+/* 全局基础色调调和 (保留系统暗黑模式兼容性) */
 :root {
-    --bg-main: #f6f5f0;
-    --bg-card: #ffffff;
-    --bg-sidebar: #fbfaf7;
-    --accent-gold: #c9933e;
-    --accent-gold-light: #fef5e7;
-    --text-primary: #1e1e1e;
-    --text-secondary: #7a7a7a;
-    --border-color: #edeae2;
-    --radius-lg: 18px;
-    --radius-md: 12px;
-    --shadow-card: 0 4px 20px rgba(0, 0, 0, 0.03);
+    --cpe-bg-main: #f6f5f0;
+    --cpe-bg-card: #ffffff;
+    --cpe-bg-sidebar: #fbfaf7;
+    --cpe-gold: #c9933e;
+    --cpe-gold-light: #fef5e7;
+    --cpe-border: #edeae2;
+    --cpe-radius-lg: 18px;
+    --cpe-radius-md: 12px;
 }
 
-body {
-    background-color: var(--bg-main) !important;
-    color: var(--text-primary) !important;
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "PingFang SC", sans-serif !important;
+/* 仅在非深色模式下覆盖背景与侧边栏，防止与深色模式冲突 */
+@media (prefers-color-scheme: light) {
+    body {
+        background-color: var(--cpe-bg-main) !important;
+    }
+    .main-left, nav#mainmenu, .navigation {
+        background-color: var(--cpe-bg-sidebar) !important;
+        border-right: 1px solid var(--cpe-border) !important;
+    }
 }
 
-.main-left, nav#mainmenu, .navigation {
-    background-color: var(--bg-sidebar) !important;
-    border-right: 1px solid var(--border-color) !important;
-}
-
-.cbi-section, .cbi-map, .panel, .card, fieldset {
-    background: var(--bg-card) !important;
-    border-radius: var(--radius-lg) !important;
-    border: 1px solid var(--border-color) !important;
-    box-shadow: var(--shadow-card) !important;
+/* Scoped 限定：仅美化外层卡片容器，坚决不破坏 CBI 表格与表单内部排版 */
+.cbi-map > .cbi-section,
+#maincontent > .panel,
+#maincontent > .card {
+    border-radius: var(--cpe-radius-lg) !important;
+    border: 1px solid var(--cpe-border) !important;
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.025) !important;
     padding: 20px 24px !important;
     margin-bottom: 24px !important;
 }
 
-.cbi-button-apply, .cbi-button-save, .btn-primary, .cbi-button-action.important {
-    background-color: var(--accent-gold) !important;
-    border-color: var(--accent-gold) !important;
+/* 按钮微调，保持圆角一致 */
+.cbi-button-apply, .cbi-button-save, .cbi-button-action.important {
+    background-color: var(--cpe-gold) !important;
+    border-color: var(--cpe-gold) !important;
     color: #ffffff !important;
-    border-radius: var(--radius-md) !important;
-    font-weight: 500 !important;
-    padding: 8px 20px !important;
+    border-radius: var(--cpe-radius-md) !important;
+}
+
+/* 移动端 (手机/竖屏平板) 响应式弹性布局防溢出 */
+@media (max-width: 768px) {
+    #maincontent {
+        padding: 12px 14px !important;
+    }
+    .myos-dashboard {
+        grid-template-columns: 1fr !important;
+        gap: 14px !important;
+    }
+    .model-canvas {
+        min-height: 330px !important;
+        padding: 16px !important;
+    }
+    .device-model-svg {
+        width: 100% !important;
+        max-width: 290px !important;
+        height: auto !important;
+    }
+    .wave-base {
+        width: 220px !important;
+        height: 70px !important;
+        bottom: 55px !important;
+    }
 }
 EOF
 
-# 2. 注入专属首页 CPE 聚合仪表盘 (带 TR3000 蓝盒实物 + ZTE F50 真实矢量动效)
+# 2. 编译期物理固化：直接向 Argon 的 cascade.css 写入 import，OTA 升级绝不失效丢失
+ARGON_DIR="feeds/luci/themes/luci-theme-argon"
+[ ! -d "$ARGON_DIR" ] && ARGON_DIR="package/feeds/luci/luci-theme-argon"
+if [ -d "$ARGON_DIR" ]; then
+    find "$ARGON_DIR" -name "cascade.css" -exec sh -c '
+        for f; do
+            if ! grep -Fq "cpe_myos_override.css" "$f"; then
+                echo "@import url(\"/luci-static/resources/cpe_myos_override.css\");" >> "$f"
+            fi
+        done
+    ' sh {} +
+fi
+
+# 3. 部署健壮版 CPE 聚合看板 (带容错降级，无数据也绝不白屏)
 mkdir -p package/base-files/files/www/luci-static/resources/view/status || true
 cat << 'EOF' > package/base-files/files/www/luci-static/resources/view/status/cpe_dashboard.js
 'use strict';
@@ -563,7 +601,7 @@ return view.extend({
 			}).length;
 		}
 
-		var f50Online = (netDevs['f50'] && netDevs['f50'].up) || (netDevs['eth2'] && netDevs['eth2'].up) || (netDevs['usb0'] && netDevs['usb0'].up);
+		var f50Online = !!((netDevs['f50'] && netDevs['f50'].up) || (netDevs['eth2'] && netDevs['eth2'].up) || (netDevs['usb0'] && netDevs['usb0'].up));
 
 		var totalMem = Math.round((info.memory && info.memory.total ? info.memory.total : 536870912) / 1048576);
 		var freeMem = Math.round((info.memory && info.memory.free ? info.memory.free : 268435456) / 1048576);
@@ -575,8 +613,7 @@ return view.extend({
 			'@keyframes f50-pulse { 0%, 100% { filter: drop-shadow(0 0 4px #00e676); } 50% { filter: drop-shadow(0 0 10px #00e676); } }',
 			'@keyframes led-blink { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }',
 			'.myos-dashboard { display: grid; grid-template-columns: 1.35fr 1fr; gap: 20px; margin-bottom: 24px; }',
-			'@media (max-width: 992px) { .myos-dashboard { grid-template-columns: 1fr; } }',
-			'.myos-card { background: #ffffff; border-radius: 20px; border: 1px solid #edeae2; box-shadow: 0 4px 20px rgba(0,0,0,0.025); padding: 24px; position: relative; }',
+			'.myos-card { background: var(--cpe-bg-card, #ffffff); border-radius: 20px; border: 1px solid var(--cpe-border, #edeae2); box-shadow: 0 4px 20px rgba(0,0,0,0.025); padding: 24px; position: relative; }',
 			'.model-canvas { display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 400px; position: relative; overflow: hidden; }',
 			'.wave-base { position: absolute; width: 280px; height: 90px; border-radius: 50%; border: 2px solid ' + (f50Online ? 'rgba(41, 128, 185, 0.45)' : 'rgba(160, 160, 160, 0.3)') + '; bottom: 65px; z-index: 1; animation: ripple-wave 2.8s infinite cubic-bezier(0, 0.2, 0.8, 1); }',
 			'.wave-base-2 { animation-delay: 1.4s; }',
@@ -636,9 +673,9 @@ return view.extend({
 
 		var modelWrapper = E('div', { 'class': 'myos-card model-canvas' }, [
 			E('div', { 'style': 'position: absolute; top: 22px; left: 24px; text-align: left;' }, [
-				E('div', { 'style': 'font-size: 20px; font-weight: 700; color: #1e1e1e; margin-bottom: 4px;' }, 
+				E('div', { 'style': 'font-size: 20px; font-weight: 700; margin-bottom: 4px;' }, 
 					f50Online ? '蜂窝 5G 聚合网络在线' : '蜂窝网络重连中 / 未就绪'),
-				E('div', { 'style': 'font-size: 13px; color: #7a7a7a;' }, 'Cudy TR3000 (哑光蓝双天线) + 中兴 F50 5G 便携联动')
+				E('div', { 'style': 'font-size: 13px; opacity: 0.75;' }, 'Cudy TR3000 (哑光蓝双天线) + 中兴 F50 5G 便携联动')
 			]),
 			E('div', { 'class': 'wave-base' }),
 			E('div', { 'class': 'wave-base wave-base-2' }),
@@ -658,48 +695,48 @@ return view.extend({
 		var rightGrid = E('div', { 'class': 'stat-grid-right' }, [
 			E('div', { 'class': 'myos-card', 'style': 'padding: 16px 20px; display: flex; justify-content: space-between; align-items: center;' }, [
 				E('div', {}, [
-					E('div', { 'style': 'font-size: 15px; font-weight: 600; color: #1e1e1e;' }, 'Wi-Fi 6 双频无线'),
-					E('div', { 'style': 'font-size: 12px; color: #7a7a7a; margin-top: 2px;' }, 'AX3000 • 160MHz 频宽全开')
+					E('div', { 'style': 'font-size: 15px; font-weight: 600;' }, 'Wi-Fi 6 双频无线'),
+					E('div', { 'style': 'font-size: 12px; opacity: 0.7; margin-top: 2px;' }, 'AX3000 • 160MHz 频宽全开')
 				]),
 				E('span', { 'class': 'status-pill pill-online' }, '运行中')
 			]),
 			E('div', { 'class': 'myos-card', 'style': 'padding: 16px 20px; display: flex; justify-content: space-between; align-items: center;' }, [
 				E('div', {}, [
-					E('div', { 'style': 'font-size: 15px; font-weight: 600; color: #1e1e1e;' }, '已连接设备'),
-					E('div', { 'style': 'font-size: 12px; color: #7a7a7a; margin-top: 2px;' }, '当前局域网在线客户端')
+					E('div', { 'style': 'font-size: 15px; font-weight: 600;' }, '已连接设备'),
+					E('div', { 'style': 'font-size: 12px; opacity: 0.7; margin-top: 2px;' }, '当前局域网在线客户端')
 				]),
 				E('div', { 'style': 'font-size: 22px; font-weight: 700; color: #c9933e;' }, clientCount + ' 台')
 			]),
 			E('div', { 'class': 'myos-card', 'style': 'padding: 18px 20px;' }, [
-				E('div', { 'style': 'font-size: 15px; font-weight: 600; color: #1e1e1e; margin-bottom: 12px; display: flex; justify-content: space-between;' }, [
+				E('div', { 'style': 'font-size: 15px; font-weight: 600; margin-bottom: 12px; display: flex; justify-content: space-between;' }, [
 					E('span', {}, '5G 调制解调器 (ZTE F50)'),
 					E('span', { 'style': 'font-size: 12px; color: #c9933e; font-weight: 500;' }, f50Online ? 'RNDIS / CDC-NCM 正常' : '未连接')
 				]),
 				E('div', { 'style': 'display: grid; grid-template-columns: 1fr 1fr; gap: 8px; font-size: 12px;' }, [
-					E('div', { 'style': 'color: #7a7a7a;' }, '设备节点: ' + E('strong', { 'style': 'color: #333;' }, 'f50 (eth2/usb0)')),
-					E('div', { 'style': 'color: #7a7a7a;' }, '优化 MTU: ' + E('strong', { 'style': 'color: #333;' }, '1420')),
-					E('div', { 'style': 'color: #7a7a7a;' }, '保活巡检: ' + E('strong', { 'style': 'color: #333;' }, '3分钟心跳自愈')),
-					E('div', { 'style': 'color: #7a7a7a;' }, '硬件加速: ' + E('strong', { 'style': 'color: #333;' }, 'MTK PPE Offload'))
+					E('div', { 'style': 'opacity: 0.7;' }, '设备节点: ' + E('strong', {}, 'f50 (eth2/usb0)')),
+					E('div', { 'style': 'opacity: 0.7;' }, '优化 MTU: ' + E('strong', {}, '1420')),
+					E('div', { 'style': 'opacity: 0.7;' }, '保活巡检: ' + E('strong', {}, '3分钟心跳自愈')),
+					E('div', { 'style': 'opacity: 0.7;' }, '硬件加速: ' + E('strong', {}, 'MTK PPE Offload'))
 				])
 			]),
 			E('div', { 'class': 'myos-card', 'style': 'padding: 18px 20px;' }, [
-				E('div', { 'style': 'font-size: 15px; font-weight: 600; color: #1e1e1e; margin-bottom: 8px;' }, '主控硬件架构'),
-				E('div', { 'style': 'font-size: 13px; color: #555;' }, 'MT7981B 双核 A53 @ 1.3GHz • 512MB RAM')
+				E('div', { 'style': 'font-size: 15px; font-weight: 600; margin-bottom: 8px;' }, '主控硬件架构'),
+				E('div', { 'style': 'font-size: 13px; opacity: 0.8;' }, 'MT7981B 双核 A53 @ 1.3GHz • 512MB RAM')
 			])
 		]);
 
 		var bottomStorageCard = E('div', { 'class': 'myos-card', 'style': 'margin-top: 4px;' }, [
 			E('div', { 'style': 'display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;' }, [
 				E('div', {}, [
-					E('strong', { 'style': 'font-size: 15px; color: #1e1e1e;' }, '内存与 512MB 闪存空间'),
-					E('span', { 'style': 'font-size: 12px; color: #888; margin-left: 10px;' }, '512MB DDR3 • 512MB SPI-NAND (mod-490)')
+					E('strong', { 'style': 'font-size: 15px;' }, '内存与 512MB 闪存空间'),
+					E('span', { 'style': 'font-size: 12px; opacity: 0.7; margin-left: 10px;' }, '512MB DDR3 • 512MB SPI-NAND (mod-490)')
 				]),
 				E('div', { 'style': 'font-size: 14px; font-weight: 600; color: #c9933e;' }, memPercent + '% 已载入')
 			]),
-			E('div', { 'style': 'width: 100%; height: 10px; background: #eee; border-radius: 6px; overflow: hidden; display: flex; margin-bottom: 8px;' }, [
+			E('div', { 'style': 'width: 100%; height: 10px; background: rgba(0,0,0,0.06); border-radius: 6px; overflow: hidden; display: flex; margin-bottom: 8px;' }, [
 				E('div', { 'style': 'width: ' + memPercent + '%; background: linear-gradient(90deg, #c9933e, #f1c40f); height: 100%; border-radius: 6px;' })
 			]),
-			E('div', { 'style': 'display: flex; justify-content: space-between; font-size: 12px; color: #777;' }, [
+			E('div', { 'style': 'display: flex; justify-content: space-between; font-size: 12px; opacity: 0.75;' }, [
 				E('span', {}, 'RAM 占用: ' + usedMem + ' MB / ' + totalMem + ' MB'),
 				E('span', {}, 'RootFS Overlay 可用: ' + E('strong', { 'style': 'color: #27ae60;' }, '~430 MB+ (超充裕空间)'))
 			])
@@ -721,7 +758,7 @@ return view.extend({
 });
 EOF
 
-# 3. 注册专属首页菜单项与 RPCD ACL
+# 4. 注册菜单与精准 RPCD ACL 权限
 mkdir -p package/base-files/files/usr/share/luci/menu.d || true
 cat << 'EOF' > package/base-files/files/usr/share/luci/menu.d/luci-app-cpe-overview.json
 {
@@ -754,23 +791,14 @@ cat << 'EOF' > package/base-files/files/usr/share/rpcd/acl.d/luci-app-cpe-overvi
 }
 EOF
 
-# 4. 开机预置：幂等注入并刷新 RPCD 权限与 LuCI 缓存
+# 5. 开机预置刷新权限与缓存
 mkdir -p package/base-files/files/etc/uci-defaults || true
 cat << 'EOF' > package/base-files/files/etc/uci-defaults/99-cpe-theme-init
-ARGON_CSS="/www/luci-static/argon/css/cascade.css"
-IMPORT_RULE='@import url("/luci-static/resources/cpe_myos_override.css");'
-
-if [ -f "$ARGON_CSS" ]; then
-    if ! grep -Fq "cpe_myos_override.css" "$ARGON_CSS"; then
-        echo "$IMPORT_RULE" >> "$ARGON_CSS"
-    fi
-fi
-
-# 确保全新开机时权限立刻生效，防止仪表盘空白
 /etc/init.d/rpcd restart 2>/dev/null || true
 rm -rf /tmp/luci-indexcache /tmp/luci-modulecache/ 2>/dev/null || true
 exit 0
 EOF
 chmod +x package/base-files/files/etc/uci-defaults/99-cpe-theme-init || true
+
 
 exit 0
