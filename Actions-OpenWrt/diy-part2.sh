@@ -754,7 +754,7 @@ cat << 'EOF' > package/base-files/files/usr/share/rpcd/acl.d/luci-app-cpe-overvi
 }
 EOF
 
-# 4. 开机预置：幂等注入（防重复追加、防崩溃降级）
+# 4. 开机预置：幂等注入并刷新 RPCD 权限与 LuCI 缓存
 mkdir -p package/base-files/files/etc/uci-defaults || true
 cat << 'EOF' > package/base-files/files/etc/uci-defaults/99-cpe-theme-init
 ARGON_CSS="/www/luci-static/argon/css/cascade.css"
@@ -765,6 +765,10 @@ if [ -f "$ARGON_CSS" ]; then
         echo "$IMPORT_RULE" >> "$ARGON_CSS"
     fi
 fi
+
+# 确保全新开机时权限立刻生效，防止仪表盘空白
+/etc/init.d/rpcd restart 2>/dev/null || true
+rm -rf /tmp/luci-indexcache /tmp/luci-modulecache/ 2>/dev/null || true
 exit 0
 EOF
 chmod +x package/base-files/files/etc/uci-defaults/99-cpe-theme-init || true
