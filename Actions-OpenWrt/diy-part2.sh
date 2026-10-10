@@ -100,7 +100,7 @@ sync
 echo 3 > /proc/sys/vm/drop_caches
 rm -f "$TMP_BIN" "$TMP_SHA"
 
-# 下载校验清单 sha256sums
+# 下载文件函数 (直连失败自动切国内加速镜像)
 download_file() {
     local remote_url="$1"
     local output_path="$2"
@@ -367,13 +367,14 @@ return view.extend({
 });
 EOF
 
-# 8. 预置中兴 F50 免驱支持（精准查找 wan 区域名称，不依赖写死下标）
+# 8. 预置中兴 F50 免驱支持与 MTU 1420 蜂窝网优化
 mkdir -p package/base-files/files/etc/uci-defaults || true
 cat << 'EOF' > package/base-files/files/etc/uci-defaults/99-f50-hotplug
 uci set network.f50=interface
 uci set network.f50.proto='dhcp'
 uci set network.f50.device='eth2'
 uci set network.f50.metric='20'
+uci set network.f50.mtu='1420'
 uci commit network
 
 for i in $(seq 0 10); do
@@ -408,14 +409,15 @@ esac
 EOF
 chmod +x package/base-files/files/etc/hotplug.d/net/99-f50-auto || true
 
-# 10. 声明配置备份白名单（升级时不丢失 OTA 脚本与核心配置）
+# 10. 声明配置备份白名单（升级时不丢失 OTA 脚本、看门狗与核心配置）
 mkdir -p package/base-files/files/etc/sysupgrade.conf || true
 cat << 'EOF' >> package/base-files/files/etc/sysupgrade.conf
 /etc/openclash/
 /usr/bin/auto-update-firmware.sh
+/usr/bin/f50-watchdog.sh
 EOF
 
-# 11. 系统时区与高可用国内 NTP 校准（解决无 RTC 硬件时钟偏差与 TLS 证书死锁）
+# 11. 系统时区与高可用国内 NTP 校准
 mkdir -p package/base-files/files/etc/uci-defaults || true
 cat << 'EOF' > package/base-files/files/etc/uci-defaults/99-timesync
 uci set system.@system[0].zonename='Asia/Shanghai'
@@ -429,5 +431,45 @@ uci commit system
 exit 0
 EOF
 chmod +x package/base-files/files/etc/uci-defaults/99-timesync || true
+
+# 12. 部署 F50 自动保活看门狗脚本
+cat << 'EOF' > package/base-files/files/usr/bin/f50-watchdog.sh
+#!/bin/sh
+
+TARGET_IP="223.5.5.5"
+LOG_TAG="F50-Watchdog"
+
+# 检查 f50 接口是否存在且已启动
+if ! ip link show f50 >/dev/null 2>&1 && ! ip link show eth2 >/dev/null 2>&1 && ! ip link show usb0 >/dev/null 2>&1; then
+    exit 0
+fi
+
+# 连续检测 3 次，超时 2 秒
+if ! ping -c 3 -W 2 -I f50 $TARGET_IP >/dev/null 2>&1; then
+    logger -t "$LOG_TAG" "检测到 F50 网络失联，正在尝试重新协商 DHCP 与拉起接口..."
+    ifdown f50
+    sleep 2
+    ifup f50
+    
+    # 二次检测，若仍不通则尝试重载网络子系统
+    sleep 8
+    if ! ping -c 2 -W 2 -I f50 $TARGET_IP >/dev/null 2>&1; then
+        logger -t "$LOG_TAG" "网络仍未恢复，执行网络协议栈重载..."
+        /etc/init.d/network restart
+    fi
+fi
+exit 0
+EOF
+chmod +x package/base-files/files/usr/bin/f50-watchdog.sh || true
+
+# 13. 开机预置看门狗计划任务 (每 3 分钟自动执行一次)
+cat << 'EOF' > package/base-files/files/etc/uci-defaults/99-f50-watchdog-cron
+CRON_JOB="*/3 * * * * /usr/bin/f50-watchdog.sh >/dev/null 2>&1"
+( crontab -l 2>/dev/null | grep -v "f50-watchdog.sh"; echo "$CRON_JOB" ) | crontab -
+/etc/init.d/cron enable
+/etc/init.d/cron restart
+exit 0
+EOF
+chmod +x package/base-files/files/etc/uci-defaults/99-f50-watchdog-cron || true
 
 exit 0
