@@ -39,7 +39,7 @@ EOF
     fi
 fi
 
-# 4. 在线升级核心脚本 (加入 sha256 校验、OOM 防护、User-Agent 与后台解耦)
+# 4. 在线升级核心脚本 (加入直连失败自动切国内加速镜像、sha256 校验、OOM 防护)
 mkdir -p package/base-files/files/usr/bin || true
 cat << 'EOF' > package/base-files/files/usr/bin/auto-update-firmware.sh
 #!/bin/sh
@@ -48,6 +48,9 @@ REPO="AA9skillz-BN/tr3000-512-25"
 LOG_FILE="/tmp/firmware_update.log"
 TMP_BIN="/tmp/firmware_upgrade.bin"
 TMP_SHA="/tmp/sha256sums"
+
+# 国内高可用备选镜像代理前缀
+PROXIES="https://ghfast.top/ https://ghproxy.net/"
 
 > "$LOG_FILE"
 
@@ -63,6 +66,18 @@ log "=========================================="
 API_URL="https://api.github.com/repos/$REPO/releases/latest"
 RELEASE_JSON=$(curl -sL -m 15 -H "User-Agent: Cudy-TR3000-OTA" "$API_URL")
 
+# API 直连失败时，尝试走加速节点拉取元数据
+if [ -z "$RELEASE_JSON" ] || ! echo "$RELEASE_JSON" | grep -q "tag_name"; then
+    log "⚠ 直连 GitHub API 超时，正在尝试加速镜像通道..."
+    for P in $PROXIES; do
+        RELEASE_JSON=$(curl -sL -m 15 -H "User-Agent: Cudy-TR3000-OTA" "${P}${API_URL}")
+        if echo "$RELEASE_JSON" | grep -q "tag_name"; then
+            log "✔ 成功通过加速镜像获取元数据: $P"
+            break
+        fi
+    done
+fi
+
 DOWNLOAD_URL=$(echo "$RELEASE_JSON" | grep -o 'https://[^" ]*cudy_tr3000-512mb-v1[^" ]*sysupgrade\.bin' | head -n 1)
 if [ -z "$DOWNLOAD_URL" ]; then
     DOWNLOAD_URL=$(echo "$RELEASE_JSON" | grep -o 'https://[^" ]*sysupgrade\.bin' | head -n 1)
@@ -73,38 +88,64 @@ TAG_NAME=$(echo "$RELEASE_JSON" | grep -o '"tag_name": *"[^"]*"' | head -n 1 | c
 
 if [ -z "$DOWNLOAD_URL" ]; then
     log "❌ 检查失败: 未能在最新 Release 中找到匹配的固件！"
-    log "API 响应概况: $(echo "$RELEASE_JSON" | head -n 2)"
     exit 1
 fi
 
 log "✔ 发现可用版本: ${TAG_NAME:-最新发布}"
-log "固件地址: $DOWNLOAD_URL"
+log "固件直连源: $DOWNLOAD_URL"
 echo "" >> "$LOG_FILE"
 
-# 清理内存缓存，防止下载大文件时 OOM
+# 内存预防性清理，释放缓冲区防止 OOM
 sync
 echo 3 > /proc/sys/vm/drop_caches
 rm -f "$TMP_BIN" "$TMP_SHA"
 
-log "正在下载校验清单 (sha256sums)..."
+# 下载校验清单 sha256sums
+download_file() {
+    local remote_url="$1"
+    local output_path="$2"
+    local desc="$3"
+
+    log "正在下载 $desc (优先直连)..."
+    curl -L -k --connect-timeout 8 -m 300 --progress-bar -o "$output_path" "$remote_url" 2>> "$LOG_FILE"
+    
+    if [ $? -eq 0 ] && [ -s "$output_path" ]; then
+        return 0
+    fi
+
+    log "⚠ 直连下载异常或超时，自动切换至国内加速镜像重试..."
+    for P in $PROXIES; do
+        local proxy_url="${P}${remote_url}"
+        log "尝试镜像通道: $proxy_url"
+        rm -f "$output_path"
+        curl -L -k --connect-timeout 10 -m 300 --progress-bar -o "$output_path" "$proxy_url" 2>> "$LOG_FILE"
+        if [ $? -eq 0 ] && [ -s "$output_path" ]; then
+            log "✔ 镜像通道拉取成功"
+            return 0
+        fi
+    done
+
+    return 1
+}
+
+# 1. 下载哈希清单
 if [ -n "$SHA_URL" ]; then
-    curl -sL -m 10 -H "User-Agent: Cudy-TR3000-OTA" -o "$TMP_SHA" "$SHA_URL"
+    download_file "$SHA_URL" "$TMP_SHA" "校验清单 (sha256sums)"
 fi
 
-log "正在下载系统固件 (请勿断电)..."
-curl -L -k --progress-bar -o "$TMP_BIN" "$DOWNLOAD_URL" 2>> "$LOG_FILE"
-
+# 2. 下载系统固件
+download_file "$DOWNLOAD_URL" "$TMP_BIN" "系统固件镜像 (请勿断电)"
 if [ $? -ne 0 ] || [ ! -s "$TMP_BIN" ]; then
-    log "❌ 固件下载失败，请检查路由器网络连接！"
+    log "❌ 固件下载失败，直连及所有加速通道均不可达，请检查网络！"
     rm -f "$TMP_BIN" "$TMP_SHA"
     exit 1
 fi
 
 BIN_SIZE=$(ls -lh "$TMP_BIN" | awk '{print $5}')
-log "✔ 固件下载完成，大小: $BIN_SIZE"
+log "✔ 固件下载成功，文件大小: $BIN_SIZE"
 echo "" >> "$LOG_FILE"
 
-# SHA256 强校验
+# 3. SHA256 强校验
 if [ -s "$TMP_SHA" ]; then
     log "正在进行 SHA256 完整性比对..."
     BIN_NAME=$(basename "$DOWNLOAD_URL")
@@ -112,19 +153,19 @@ if [ -s "$TMP_SHA" ]; then
     if [ -n "$EXPECTED_HASH" ]; then
         ACTUAL_HASH=$(sha256sum "$TMP_BIN" | awk '{print $1}')
         if [ "$EXPECTED_HASH" != "$ACTUAL_HASH" ]; then
-            log "❌ 校验失败: 固件哈希不匹配，可能下载已损坏或被截断！"
-            log "期望: $EXPECTED_HASH"
-            log "实际: $ACTUAL_HASH"
+            log "❌ 校验失败: 固件哈希不匹配，可能文件被破坏或篡改！"
+            log "期望值: $EXPECTED_HASH"
+            log "实际值: $ACTUAL_HASH"
             rm -f "$TMP_BIN" "$TMP_SHA"
             exit 1
         fi
-        log "✔ SHA256 校验一致 ($ACTUAL_HASH)"
+        log "✔ SHA256 哈希校验完全一致 ($ACTUAL_HASH)"
     else
-        log "⚠ 校验清单中未找到对应文件名，跳过哈希硬比对"
+        log "⚠ 校验清单中未检索到同名条目，跳过哈希强制比对"
     fi
 fi
 
-# 使用 OpenWrt 原生元数据工具验证固件架构
+# 4. OpenWrt 原生元数据验证
 log "正在执行固件元数据合规检查..."
 if command -v fwtool >/dev/null 2>&1; then
     if ! fwtool -q -i /dev/null "$TMP_BIN" 2>/dev/null; then
@@ -135,15 +176,15 @@ if command -v fwtool >/dev/null 2>&1; then
 fi
 
 log "✔ 安全校验通过！系统即将在 3 秒后执行写入并重启..."
-log "提示: 升级过程中千万不要断电，完成后访问 192.168.6.1"
+log "提示: 刷入过程中切勿断电，完成后访问 192.168.6.1"
 log "=========================================="
 
-# 杀掉大内存后台应用确保刷机时内存充足
+# 杀掉大内存后台服务保障写入稳定性
 /etc/init.d/openclash stop 2>/dev/null || true
 sync
 echo 3 > /proc/sys/vm/drop_caches
 
-# 脱离当前调用进程并在后台执行刷机
+# 后台解耦执行刷机
 ( sleep 3 && sysupgrade "$TMP_BIN" ) >/dev/null 2>&1 &
 exit 0
 EOF
@@ -235,7 +276,7 @@ return view.extend({
 		var viewDOM = E('div', { 'class': 'cbi-map' }, [
 			styleNode,
 			E('h2', {}, _('在线固件升级')),
-			E('div', { 'class': 'cbi-map-descr' }, _('一键拉取 AA9skillz-BN/tr3000-512-25 仓库最新 Release 固件，自动进行安全校验并保留配置升级。')),
+			E('div', { 'class': 'cbi-map-descr' }, _('一键拉取 AA9skillz-BN/tr3000-512-25 仓库最新 Release 固件，支持国内镜像智能故障转移，保留配置无感升级。')),
 
 			E('div', { 'class': 'cbi-section' }, [
 				E('div', { 'class': 'cbi-section-node' }, [
@@ -245,7 +286,7 @@ return view.extend({
 					]),
 					E('div', { 'class': 'cbi-value' }, [
 						E('label', { 'class': 'cbi-value-title' }, _('更新通道')),
-						E('div', { 'class': 'cbi-value-field' }, 'GitHub Releases (owrt 25.x 自动化构建)')
+						E('div', { 'class': 'cbi-value-field' }, 'GitHub Releases (含国内备用镜像通道)')
 					])
 				])
 			]),
@@ -281,6 +322,9 @@ return view.extend({
 											logArea.value = res;
 											logArea.scrollTop = logArea.scrollHeight;
 
+											if (res.indexOf('加速镜像') !== -1) {
+												txt.innerText = '已切换国内加速通道下载中...';
+											}
 											if (res.indexOf('SHA256 完整性比对') !== -1) {
 												dot.className = 'ota-dot dot-check active';
 												txt.innerText = '正在校验固件哈希一致性...';
