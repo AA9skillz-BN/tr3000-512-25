@@ -938,5 +938,17 @@ exit 0
 EOF
 chmod +x package/base-files/files/etc/uci-defaults/99-cpe-theme-init || true
 
+# ==============================================================================
+# 15. 预置底层网络与内核模块依赖 (支持 OpenBox / 透明代理 / 虚拟网卡)
+# ==============================================================================
+cat << 'EOF' >> .config
+CONFIG_PACKAGE_kmod-tun=y
+CONFIG_PACKAGE_kmod-nft-queue=y
+CONFIG_PACKAGE_kmod-nft-nat=y
+CONFIG_PACKAGE_kmod-veth=y
+CONFIG_PACKAGE_ip-full=y
+CONFIG_PACKAGE_ca-bundle=y
+EOF
+
 
 exit 0
