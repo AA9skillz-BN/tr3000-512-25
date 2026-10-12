@@ -64,11 +64,7 @@ jobs:
 
     - name: Load custom configuration
       run: |
-        chmod +x $DIY_P2_SH
-        cd openwrt
-        $GITHUB_WORKSPACE/$DIY_P2_SH || true
-
-        # 匹配配置源文件
+        # 1. 优先载入 .config 模板文件
         cd $GITHUB_WORKSPACE
         if [ -f "$CONFIG_FILE" ]; then
             echo "Found config at $CONFIG_FILE"
@@ -77,6 +73,11 @@ jobs:
             echo "Found config at root .config"
             cp -f ".config" openwrt/.config
         fi
+
+        # 2. 执行 DIY 脚本（确保第 15 步的追加写入生效，不会被 cp 覆盖）
+        chmod +x $DIY_P2_SH
+        cd openwrt
+        $GITHUB_WORKSPACE/$DIY_P2_SH || true
         exit 0
 
     - name: Download package
@@ -157,7 +158,7 @@ jobs:
 
     - name: Upload firmware to release
       uses: softprops/action-gh-release@v2
-      if: steps.tag.outputs.status == 'success' && !cancelled()
+      if: steps.tag.outputs.release_tag != '' && !cancelled()
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
@@ -167,7 +168,7 @@ jobs:
 
     - name: Delete older releases (保留最新 3 个)
       uses: dev-drprasad/delete-older-releases@v0.3.3
-      if: steps.tag.outputs.status == 'success' && !cancelled()
+      if: steps.tag.outputs.release_tag != '' && !cancelled()
       continue-on-error: true
       with:
         keep_latest: 3
