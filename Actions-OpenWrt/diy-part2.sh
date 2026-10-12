@@ -473,13 +473,15 @@ EOF
 chmod +x package/base-files/files/etc/uci-defaults/99-f50-watchdog-cron || true
 
 # ==============================================================================
-# 14. 注入标准兼容版 CPE-MYOS 深度美化层 (手机端响应式 + 局部作用域 + 编译期固化)
+# 14. 注入标准兼容版 CPE-MYOS 深度美化层 (防污染作用域 + 动效登录页 + 双保险注入)
 # ==============================================================================
 
-# 1. 编译期直接部署独立样式表 (Scoped 样式，不污染内部表单控件；支持移动端适配)
+# 1. 编译期部署独立样式表
 mkdir -p package/base-files/files/www/luci-static/resources || true
 cat << 'EOF' > package/base-files/files/www/luci-static/resources/cpe_myos_override.css
-/* 全局基础色调调和 (保留系统暗黑模式兼容性) */
+/* ==========================================================================
+   1. 全局基础色调与卡片微调 (MYOS 风格)
+   ========================================================================== */
 :root {
     --cpe-bg-main: #f6f5f0;
     --cpe-bg-card: #ffffff;
@@ -491,9 +493,8 @@ cat << 'EOF' > package/base-files/files/www/luci-static/resources/cpe_myos_overr
     --cpe-radius-md: 12px;
 }
 
-/* 仅在非深色模式下覆盖背景与侧边栏，防止与深色模式冲突 */
 @media (prefers-color-scheme: light) {
-    body {
+    body:not(.login) {
         background-color: var(--cpe-bg-main) !important;
     }
     .main-left, nav#mainmenu, .navigation {
@@ -502,7 +503,7 @@ cat << 'EOF' > package/base-files/files/www/luci-static/resources/cpe_myos_overr
     }
 }
 
-/* Scoped 限定：仅美化外层卡片容器，坚决不破坏 CBI 表格与表单内部排版 */
+/* Scoped 限定：仅美化外层卡片容器，绝不破坏内部表单排版 */
 .cbi-map > .cbi-section,
 #maincontent > .panel,
 #maincontent > .card {
@@ -513,7 +514,6 @@ cat << 'EOF' > package/base-files/files/www/luci-static/resources/cpe_myos_overr
     margin-bottom: 24px !important;
 }
 
-/* 按钮微调，保持圆角一致 */
 .cbi-button-apply, .cbi-button-save, .cbi-button-action.important {
     background-color: var(--cpe-gold) !important;
     border-color: var(--cpe-gold) !important;
@@ -521,7 +521,137 @@ cat << 'EOF' > package/base-files/files/www/luci-static/resources/cpe_myos_overr
     border-radius: var(--cpe-radius-md) !important;
 }
 
-/* 移动端 (手机/竖屏平板) 响应式弹性布局防溢出 */
+/* ==========================================================================
+   2. 专属定制：MYOS 暖白香槟金 5G 动态呼吸登录页 (防污染前缀限制)
+   ========================================================================== */
+@keyframes login-wave {
+    0% { transform: scale(0.7); opacity: 0.8; }
+    50% { opacity: 0.4; }
+    100% { transform: scale(1.35); opacity: 0; }
+}
+
+@keyframes float-badge {
+    0%, 100% { transform: translateY(0); }
+    50% { transform: translateY(-5px); }
+}
+
+/* 仅在登录状态下接管全屏背景 */
+body.login, .login-page {
+    background: radial-gradient(circle at 50% 30%, #ffffff 0%, #f6f5f0 75%) !important;
+    min-height: 100vh !important;
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+}
+
+body.login::before, .login-page::before, .login-bg {
+    display: none !important;
+}
+
+/* 核心悬浮卡片容器 (必须限制在 body.login 作用域内) */
+body.login .login-container, 
+body.login .login-box, 
+body.login form[action*="login"] {
+    background: #ffffff !important;
+    border-radius: 24px !important;
+    border: 1px solid #edeae2 !important;
+    box-shadow: 0 12px 40px rgba(27, 42, 74, 0.06), 0 2px 8px rgba(0, 0, 0, 0.02) !important;
+    padding: 40px 36px 36px 36px !important;
+    max-width: 400px !important;
+    width: 90% !important;
+    position: relative !important;
+    overflow: visible !important;
+}
+
+/* 登录卡片上方动态光晕徽标 */
+body.login .login-container::before {
+    content: "";
+    position: absolute;
+    top: -45px;
+    left: 50%;
+    transform: translateX(-50%);
+    width: 90px;
+    height: 90px;
+    border-radius: 50%;
+    background: rgba(201, 147, 62, 0.12);
+    border: 1px solid rgba(201, 147, 62, 0.35);
+    z-index: 1;
+    animation: login-wave 3s infinite cubic-bezier(0, 0.2, 0.8, 1);
+}
+
+body.login .login-container::after {
+    content: "5G";
+    position: absolute;
+    top: -35px;
+    left: 50%;
+    transform: translateX(-50%);
+    width: 70px;
+    height: 70px;
+    border-radius: 50%;
+    background: linear-gradient(135deg, #2c4c7a 0%, #182d49 100%);
+    color: #ffffff;
+    font-weight: 800;
+    font-size: 20px;
+    letter-spacing: 1px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    box-shadow: 0 8px 20px rgba(44, 76, 122, 0.28);
+    border: 3px solid #ffffff;
+    z-index: 2;
+    animation: float-badge 3.5s ease-in-out infinite;
+}
+
+body.login h2, 
+body.login form[action*="login"] legend {
+    font-size: 20px !important;
+    font-weight: 700 !important;
+    color: #1e1e1e !important;
+    text-align: center !important;
+    margin-top: 35px !important;
+    margin-bottom: 6px !important;
+}
+
+body.login input[type="text"],
+body.login input[type="password"] {
+    background: #fbfaf7 !important;
+    border: 1px solid #edeae2 !important;
+    border-radius: 12px !important;
+    padding: 12px 16px !important;
+    font-size: 14px !important;
+    color: #1e1e1e !important;
+    width: 100% !important;
+    box-sizing: border-box !important;
+    transition: all 0.25s ease !important;
+}
+
+body.login input[type="text"]:focus,
+body.login input[type="password"]:focus {
+    border-color: #c9933e !important;
+    background: #ffffff !important;
+    box-shadow: 0 0 0 3px rgba(201, 147, 62, 0.15) !important;
+    outline: none !important;
+}
+
+body.login input[type="submit"],
+body.login .cbi-button-action {
+    background: linear-gradient(135deg, #c9933e 0%, #b8822f 100%) !important;
+    border: none !important;
+    border-radius: 12px !important;
+    color: #ffffff !important;
+    font-weight: 600 !important;
+    font-size: 15px !important;
+    padding: 12px !important;
+    width: 100% !important;
+    margin-top: 14px !important;
+    cursor: pointer !important;
+    box-shadow: 0 6px 16px rgba(201, 147, 62, 0.25) !important;
+    transition: all 0.25s ease !important;
+}
+
+/* ==========================================================================
+   3. 移动端 (手机/竖屏平板) 响应式弹性自适应
+   ========================================================================== */
 @media (max-width: 768px) {
     #maincontent {
         padding: 12px 14px !important;
@@ -547,20 +677,14 @@ cat << 'EOF' > package/base-files/files/www/luci-static/resources/cpe_myos_overr
 }
 EOF
 
-# 2. 编译期物理固化：直接向 Argon 的 cascade.css 写入 import，OTA 升级绝不失效丢失
-ARGON_DIR="feeds/luci/themes/luci-theme-argon"
-[ ! -d "$ARGON_DIR" ] && ARGON_DIR="package/feeds/luci/luci-theme-argon"
-if [ -d "$ARGON_DIR" ]; then
-    find "$ARGON_DIR" -name "cascade.css" -exec sh -c '
-        for f; do
-            if ! grep -Fq "cpe_myos_override.css" "$f"; then
-                echo "@import url(\"/luci-static/resources/cpe_myos_override.css\");" >> "$f"
-            fi
-        done
-    ' sh {} +
-fi
+# 2. 编译期物理固化：全盘深度检索并写入 Argon 的 cascade.css
+find package/ feeds/ -name "cascade.css" 2>/dev/null | grep "argon" | while read -r f; do
+    if ! grep -Fq "cpe_myos_override.css" "$f"; then
+        echo "@import url(\"/luci-static/resources/cpe_myos_override.css\");" >> "$f"
+    fi
+done
 
-# 3. 部署健壮版 CPE 聚合看板 (带容错降级，无数据也绝不白屏)
+# 3. 部署健壮版 CPE 聚合看板
 mkdir -p package/base-files/files/www/luci-static/resources/view/status || true
 cat << 'EOF' > package/base-files/files/www/luci-static/resources/view/status/cpe_dashboard.js
 'use strict';
@@ -791,9 +915,18 @@ cat << 'EOF' > package/base-files/files/usr/share/rpcd/acl.d/luci-app-cpe-overvi
 }
 EOF
 
-# 5. 开机预置刷新权限与缓存
+# 5. 开机预置：双保险兜底注入 + 刷新 RPCD 权限与缓存
 mkdir -p package/base-files/files/etc/uci-defaults || true
 cat << 'EOF' > package/base-files/files/etc/uci-defaults/99-cpe-theme-init
+ARGON_CSS="/www/luci-static/argon/css/cascade.css"
+IMPORT_RULE='@import url("/luci-static/resources/cpe_myos_override.css");'
+
+if [ -f "$ARGON_CSS" ]; then
+    if ! grep -Fq "cpe_myos_override.css" "$ARGON_CSS"; then
+        echo "$IMPORT_RULE" >> "$ARGON_CSS"
+    fi
+fi
+
 /etc/init.d/rpcd restart 2>/dev/null || true
 rm -rf /tmp/luci-indexcache /tmp/luci-modulecache/ 2>/dev/null || true
 exit 0
