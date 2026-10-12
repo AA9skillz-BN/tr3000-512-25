@@ -754,11 +754,11 @@ html, body {
 }
 EOF
 
-# 2. 编译期物理固化 (加上 chmod 确保写入成功，安全排除符号链接递归死循环)
+# 2. 编译期物理固化 (将 @import 插入到第一行最顶端，严守 W3C 规范确保浏览器解析)
 for CSS_FILE in $(find package/ feeds/ -type f -name "cascade.css" 2>/dev/null | grep "argon"); do
     chmod +w "$CSS_FILE" 2>/dev/null || true
     if ! grep -Fq "cpe_myos_override.css" "$CSS_FILE"; then
-        echo '@import url("/luci-static/resources/cpe_myos_override.css");' >> "$CSS_FILE"
+        sed -i '1i@import url("/luci-static/resources/cpe_myos_override.css");' "$CSS_FILE"
     fi
 done
 
@@ -1000,7 +1000,7 @@ cat << 'EOF' > package/base-files/files/usr/share/rpcd/acl.d/luci-app-cpe-overvi
 }
 EOF
 
-# 5. 开机预置：双保险兜底注入 + 刷新 RPCD 权限与缓存
+# 5. 开机预置：双保险首行置顶注入 + 刷新 RPCD 权限与缓存
 mkdir -p package/base-files/files/etc/uci-defaults || true
 cat << 'EOF' > package/base-files/files/etc/uci-defaults/99-cpe-theme-init
 ARGON_CSS="/www/luci-static/argon/css/cascade.css"
@@ -1008,7 +1008,8 @@ IMPORT_RULE='@import url("/luci-static/resources/cpe_myos_override.css");'
 
 if [ -f "$ARGON_CSS" ]; then
     if ! grep -Fq "cpe_myos_override.css" "$ARGON_CSS"; then
-        echo "$IMPORT_RULE" >> "$ARGON_CSS"
+        # 兼容 OpenWrt BusyBox 环境，纯 Shell 首行注入
+        echo "$IMPORT_RULE" | cat - "$ARGON_CSS" > /tmp/cascade.tmp && mv /tmp/cascade.tmp "$ARGON_CSS"
     fi
 fi
 
