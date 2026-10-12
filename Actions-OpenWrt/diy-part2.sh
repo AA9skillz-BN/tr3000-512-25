@@ -25,7 +25,8 @@ define Device/cudy_tr3000-512mb-v1
   DEVICE_VARIANT := 512mb v1
   DEVICE_DTS := mt7981b-cudy-tr3000-512mb-v1
   DEVICE_DTS_DIR := ../dts
-  SUPPORTED_DEVICES += R47 cudy,tr3000-v1 \ cudy,tr3000-512mb-v1
+  SUPPORTED_DEVICES += R47 cudy,tr3000-v1 \
+                       cudy,tr3000-512mb-v1
   UBINIZE_OPTS := -E 5
   BLOCKSIZE := 128k
   PAGESIZE := 2048
@@ -410,7 +411,7 @@ EOF
 chmod +x package/base-files/files/etc/hotplug.d/net/99-f50-auto || true
 
 # 10. 声明配置备份白名单（升级时不丢失 OTA 脚本、看门狗与核心配置）
-mkdir -p package/base-files/files/etc/sysupgrade.conf || true
+mkdir -p package/base-files/files/etc || true
 cat << 'EOF' >> package/base-files/files/etc/sysupgrade.conf
 /etc/openclash/
 /usr/bin/auto-update-firmware.sh
@@ -807,6 +808,565 @@ return view.extend({
 				'</linearGradient>' +
 				'<linearGradient id="f50White" x1="0%" y1="0%" x2="100%" y2="100%">' +
 					'<stop offset="0%" stop-color="#FFFFFF" />' +
+					'<stop offset="60%" stop-color="#F7F8FA" />' +
+					'<stop offset="100%" stop-color="#E5E9F0" />' +
+				'</linearGradient>' +
+			'</defs>' +
+			'<ellipse cx="150" cy="226" rx="100" ry="14" fill="#D6DEE8" />' +
+			'<g transform="rotate(-18 68 180)">' +
+				'<rect x="62" y="55" width="12" height="130" rx="6" fill="url(#trAntenna)" stroke="#1a2e4c" stroke-width="1.2" />' +
+				'<circle cx="68" cy="180" r="8" fill="#1b2f4d" stroke="#34588c" stroke-width="1.5" />' +
+			'</g>' +
+			'<g transform="rotate(18 232 180)">' +
+				'<rect x="226" y="55" width="12" height="130" rx="6" fill="url(#trAntenna)" stroke="#1a2e4c" stroke-width="1.2" />' +
+				'<circle cx="232" cy="180" r="8" fill="#1b2f4d" stroke="#34588c" stroke-width="1.5" />' +
+			'</g>' +
+			'<rect x="75" y="150" width="150" height="68" rx="12" fill="url(#trBlueBody)" stroke="#1a2e4c" stroke-width="1.5" />' +
+			'<path d="M85 152 L215 152" stroke="#4872a8" stroke-width="2" stroke-linecap="round" opacity="0.65" />' +
+			'<text x="150" y="174" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="11" font-weight="700" fill="#E8EEF5" letter-spacing="1.2">cudy</text>' +
+			'<text x="150" y="185" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="7.5" font-weight="600" fill="#8CA4C4" letter-spacing="0.5">TR3000 • 512MB</text>' +
+			'<circle cx="132" cy="202" r="2.5" fill="' + (f50Online ? '#00e676' : '#ffab00') + '" style="animation: led-blink 1.8s infinite;" />' +
+			'<circle cx="144" cy="202" r="2.5" fill="#00e676" />' +
+			'<circle cx="156" cy="202" r="2.5" fill="#00e676" />' +
+			'<circle cx="168" cy="202" r="2.5" fill="#3b5980" />' +
+			'<path d="M225 188 C242 188, 245 160, 260 160" stroke="#7A8B9E" stroke-width="3" stroke-linecap="round" fill="none" />' +
+			'<g transform="translate(258, 126)">' +
+				'<rect x="0" y="0" width="46" height="66" rx="8" fill="url(#f50White)" stroke="#D0D7DE" stroke-width="1.5" filter="drop-shadow(0 6px 12px rgba(0,0,0,0.12))" />' +
+				'<text x="23" y="20" text-anchor="middle" font-family="-apple-system, sans-serif" font-size="7.5" font-weight="800" fill="#2E3A4B">ZTE</text>' +
+				'<text x="23" y="34" text-anchor="middle" font-family="-apple-system, sans-serif" font-size="9" font-weight="900" fill="#C9933E" letter-spacing="0.5">5G+</text>' +
+				'<text x="23" y="44" text-anchor="middle" font-family="-apple-system, sans-serif" font-size="6" font-weight="600" fill="#8892A0">F50 Portable</text>' +
+				'<circle cx="17" cy="54" r="2" fill="' + (f50Online ? '#00e676' : '#ff5252') + '" style="' + (f50Online ? 'animation: f50-pulse 1.5s infinite;' : '') + '" />' +
+				'<circle cx="29" cy="54" r="2" fill="' + (f50Online ? '#00e676' : '#999') + '" />' +
+			'</g>' +
+		'</svg>';
+
+		var modelWrapper = E('div', { 'class': 'myos-card model-canvas' }, [
+			E('div', { 'style': 'position: absolute; top: 22px; left: 24px; text-align: left;' }, [
+				E('div', { 'style': 'font-size: 20px; font-weight: 700; margin-bottom: 4px;' }, 
+					f50Online ? '蜂窝 5G 聚合网络在线' : '蜂窝网络重连中 / 未就绪'),
+				E('div', { 'style': 'font-size: 13px; opacity: 0.75;' }, 'Cudy TR3000 (哑光蓝双天线) + 中兴 F50 5G 便携联动')
+			]),
+			E('div', { 'class': 'wave-base' }),
+			E('div', { 'class': 'wave-base wave-base-2' }),
+			(function() {
+				var div = E('div', { 'style': 'position: relative; z-index: 2;' });
+				div.innerHTML = deviceSvg;
+				return div;
+			})(),
+			E('div', { 'style': 'margin-top: 12px; z-index: 3;' }, [
+				E('span', { 'class': 'status-pill ' + (f50Online ? 'pill-online' : 'pill-offline') }, [
+					E('span', { 'style': 'margin-right: 6px; font-size: 14px;' }, f50Online ? '●' : '○'),
+					f50Online ? '5G 全双工透传 • MTU 1420 优化' : 'F50 等待握手或看门狗介入'
+				])
+			])
+		]);
+
+		var rightGrid = E('div', { 'class': 'stat-grid-right' }, [
+			E('div', { 'class': 'myos-card', 'style': 'padding: 16px 20px; display: flex; justify-content: space-between; align-items: center;' }, [
+				E('div', {}, [
+					E('div', { 'style': 'font-size: 15px; font-weight: 600;' }, 'Wi-Fi 6 双频无线'),
+					E('div', { 'style': 'font-size: 12px; opacity: 0.7; margin-top: 2px;' }, 'AX3000 • 160MHz 频宽全开')
+				]),
+				E('span', { 'class': 'status-pill pill-online' }, '运行中')
+			]),
+			E('div', { 'class': 'myos-card', 'style': 'padding: 16px 20px; display: flex; justify-content: space-between; align-items: center;' }, [
+				E('div', {}, [
+					E('div', { 'style': 'font-size: 15px; font-weight: 600;' }, '已连接设备'),
+					E('div', { 'style': 'font-size: 12px; opacity: 0.7; margin-top: 2px;' }, '当前局域网在线客户端')
+				]),
+				E('div', { 'style': 'font-size: 22px; font-weight: 700; color: #c9933e;' }, clientCount + ' 台')
+			]),
+			E('div', { 'class': 'myos-card', 'style': 'padding: 18px 20px;' }, [
+				E('div', { 'style': 'font-size: 15px; font-weight: 600; margin-bottom: 12px; display: flex; justify-content: space-between;' }, [
+					E('span', {}, '5G 调制解调器 (ZTE F50)'),
+					E('span', { 'style': 'font-size: 12px; color: #c9933e; font-weight: 500;' }, f50Online ? 'RNDIS / CDC-NCM 正常' : '未连接')
+				]),
+				E('div', { 'style': 'display: grid; grid-template-columns: 1fr 1fr; gap: 8px; font-size: 12px;' }, [
+					E('div', { 'style': 'opacity: 0.7;' }, '设备节点: ' + E('strong', {}, 'f50 (eth2/usb0)')),
+					E('div', { 'style': 'opacity: 0.7;' }, '优化 MTU: ' + E('strong', {}, '1420')),
+					E('div', { 'style': 'opacity: 0.7;' }, '保活巡检: ' + E('strong', {}, '3分钟心跳自愈')),
+					E('div', { 'style': 'opacity: 0.7;' }, '硬件加速: ' + E('strong', {}, 'MTK PPE Offload'))
+				])
+			]),
+			E('div', { 'class': 'myos-card', 'style': 'padding: 18px 20px;' }, [
+				E('div', { 'style': 'font-size: 15px; font-weight: 600; margin-bottom: 8px;' }, '主控硬件架构'),
+				E('div', { 'style': 'font-size: 13px; opacity: 0.8;' }, 'MT7981B 双核 A53 @ 1.3GHz • 512MB RAM')
+			])
+		]);
+
+		var bottomStorageCard = E('div', { 'class': 'myos-card', 'style': 'margin-top: 4px;' }, [
+			E('div', { 'style': 'display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;' }, [
+				E('div', {}, [
+					E('strong', { 'style': 'font-size: 15px;' }, '内存与 512MB 闪存空间'),
+					E('span', { 'style': 'font-size: 12px; opacity: 0.7; margin-left: 10px;' }, '512MB DDR3 • 512MB SPI-NAND (mod-490)')
+				]),
+				E('div', { 'style': 'font-size: 14px; font-weight: 600; color: #c9933e;' }, memPercent + '% 已载入')
+			]),
+			E('div', { 'style': 'width: 100%; height: 10px; background: rgba(0,0,0,0.06); border-radius: 6px; overflow: hidden; display: flex; margin-bottom: 8px;' }, [
+				E('div', { 'style': 'width: ' + memPercent + '%; background: linear-gradient(90deg, #c9933e, #f1c40f); height: 100%; border-radius: 6px;' })
+			]),
+			E('div', { 'style': 'display: flex; justify-content: space-between; font-size: 12px; opacity: 0.75;' }, [
+				E('span', {}, 'RAM 占用: ' + usedMem + ' MB / ' + totalMem + ' MB'),
+				E('span', {}, 'RootFS Overlay 可用: ' + E('strong', { 'style': 'color: #27ae60;' }, '~430 MB+ (超充裕空间)'))
+			])
+		]);
+
+		return E('div', { 'class': 'cbi-map' }, [
+			styleNode,
+			E('div', { 'class': 'myos-dashboard' }, [
+				modelWrapper,
+				rightGrid
+			]),
+			bottomStorageCard
+		]);
+	},
+
+	handleSaveApply: null,
+	handleSave: null,
+	handleReset: null
+});
+EOF
+
+# 8. 预置中兴 F50 免驱支持与 MTU 1420 蜂窝网优化
+mkdir -p package/base-files/files/etc/uci-defaults || true
+cat << 'EOF' > package/base-files/files/etc/uci-defaults/99-f50-hotplug
+uci set network.f50=interface
+uci set network.f50.proto='dhcp'
+uci set network.f50.device='eth2'
+uci set network.f50.metric='20'
+uci set network.f50.mtu='1420'
+uci commit network
+
+for i in $(seq 0 10); do
+    ZNAME=$(uci -q get firewall.@zone[$i].name)
+    if [ "$ZNAME" = "wan" ]; then
+        uci add_list firewall.@zone[$i].network='f50'
+        uci commit firewall
+        break
+    fi
+done
+
+exit 0
+EOF
+chmod +x package/base-files/files/etc/uci-defaults/99-f50-hotplug || true
+
+# 9. 部署 USB 动态热插拔规则（引入 2 秒 Link-Up 缓冲，防止 DHCP 超时丢包）
+mkdir -p package/base-files/files/etc/hotplug.d/net || true
+cat << 'EOF' > package/base-files/files/etc/hotplug.d/net/99-f50-auto
+case "$ACTION" in
+    add)
+        if [ "$INTERFACE" = "usb0" ] || [ "$INTERFACE" = "eth2" ]; then
+            CURRENT_DEV=$(uci -q get network.f50.device)
+            if [ "$CURRENT_DEV" != "$INTERFACE" ]; then
+                uci set network.f50.device="$INTERFACE"
+                uci commit network
+                /etc/init.d/network reload
+            fi
+            ( sleep 2 && ifup f50 ) &
+        fi
+        ;;
+esac
+EOF
+chmod +x package/base-files/files/etc/hotplug.d/net/99-f50-auto || true
+
+# 10. 声明配置备份白名单（升级时不丢失 OTA 脚本、看门狗与核心配置）
+mkdir -p package/base-files/files/etc || true
+cat << 'EOF' >> package/base-files/files/etc/sysupgrade.conf
+/etc/openclash/
+/usr/bin/auto-update-firmware.sh
+/usr/bin/f50-watchdog.sh
+EOF
+
+# 11. 系统时区与高可用国内 NTP 校准
+mkdir -p package/base-files/files/etc/uci-defaults || true
+cat << 'EOF' > package/base-files/files/etc/uci-defaults/99-timesync
+uci set system.@system[0].zonename='Asia/Shanghai'
+uci set system.@system[0].timezone='CST-8'
+uci -q delete system.ntp.server
+uci add_list system.ntp.server='ntp.aliyun.com'
+uci add_list system.ntp.server='time1.cloud.tencent.com'
+uci add_list system.ntp.server='cn.pool.ntp.org'
+uci add_list system.ntp.server='pool.ntp.org'
+uci commit system
+exit 0
+EOF
+chmod +x package/base-files/files/etc/uci-defaults/99-timesync || true
+
+# 12. 部署 F50 自动保活看门狗脚本
+cat << 'EOF' > package/base-files/files/usr/bin/f50-watchdog.sh
+#!/bin/sh
+
+TARGET_IP="223.5.5.5"
+LOG_TAG="F50-Watchdog"
+
+# 检查 f50 接口是否存在且已启动
+if ! ip link show f50 >/dev/null 2>&1 && ! ip link show eth2 >/dev/null 2>&1 && ! ip link show usb0 >/dev/null 2>&1; then
+    exit 0
+fi
+
+# 连续检测 3 次，超时 2 秒
+if ! ping -c 3 -W 2 -I f50 $TARGET_IP >/dev/null 2>&1; then
+    logger -t "$LOG_TAG" "检测到 F50 网络失联，正在尝试重新协商 DHCP 与拉起接口..."
+    ifdown f50
+    sleep 2
+    ifup f50
+    
+    # 二次检测，若仍不通则尝试重载网络子系统
+    sleep 8
+    if ! ping -c 2 -W 2 -I f50 $TARGET_IP >/dev/null 2>&1; then
+        logger -t "$LOG_TAG" "网络仍未恢复，执行网络协议栈重载..."
+        /etc/init.d/network restart
+    fi
+fi
+exit 0
+EOF
+chmod +x package/base-files/files/usr/bin/f50-watchdog.sh || true
+
+# 13. 开机预置看门狗计划任务 (每 3 分钟自动执行一次)
+cat << 'EOF' > package/base-files/files/etc/uci-defaults/99-f50-watchdog-cron
+CRON_JOB="*/3 * * * * /usr/bin/f50-watchdog.sh >/dev/null 2>&1"
+( crontab -l 2>/dev/null | grep -v "f50-watchdog.sh"; echo "$CRON_JOB" ) | crontab -
+/etc/init.d/cron enable
+/etc/init.d/cron restart
+exit 0
+EOF
+chmod +x package/base-files/files/etc/uci-defaults/99-f50-watchdog-cron || true
+
+# ==============================================================================
+# 14. 注入标准兼容版 CPE-MYOS 深度美化层 (防污染作用域 + 动效登录页 + 健壮渲染容错)
+# ==============================================================================
+
+# 1. 编译期部署独立样式表
+mkdir -p package/base-files/files/www/luci-static/resources || true
+cat << 'EOF' > package/base-files/files/www/luci-static/resources/cpe_myos_override.css
+/* ==========================================================================
+   1. 全局基础色调与卡片微调 (MYOS 风格)
+   ========================================================================== */
+:root {
+    --cpe-bg-main: #f6f5f0;
+    --cpe-bg-card: #ffffff;
+    --cpe-bg-sidebar: #fbfaf7;
+    --cpe-gold: #c9933e;
+    --cpe-gold-light: #fef5e7;
+    --cpe-border: #edeae2;
+    --cpe-radius-lg: 18px;
+    --cpe-radius-md: 12px;
+}
+
+@media (prefers-color-scheme: light) {
+    body:not(.login) {
+        background-color: var(--cpe-bg-main) !important;
+    }
+    .main-left, nav#mainmenu, .navigation {
+        background-color: var(--cpe-bg-sidebar) !important;
+        border-right: 1px solid var(--cpe-border) !important;
+    }
+}
+
+/* Scoped 限定：仅美化外层卡片容器，绝不破坏内部表单排版 */
+.cbi-map > .cbi-section,
+#maincontent > .panel,
+#maincontent > .card {
+    border-radius: var(--cpe-radius-lg) !important;
+    border: 1px solid var(--cpe-border) !important;
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.025) !important;
+    padding: 20px 24px !important;
+    margin-bottom: 24px !important;
+}
+
+.cbi-button-apply, .cbi-button-save, .cbi-button-action.important {
+    background-color: var(--cpe-gold) !important;
+    border-color: var(--cpe-gold) !important;
+    color: #ffffff !important;
+    border-radius: var(--cpe-radius-md) !important;
+}
+
+/* ==========================================================================
+   2. 专属定制：MYOS 暖白香槟金 5G 动态呼吸登录页 (防污染前缀限制)
+   ========================================================================== */
+@keyframes login-wave {
+    0% { transform: scale(0.7); opacity: 0.8; }
+    50% { opacity: 0.4; }
+    100% { transform: scale(1.35); opacity: 0; }
+}
+
+@keyframes float-badge {
+    0%, 100% { transform: translateY(0); }
+    50% { transform: translateY(-5px); }
+}
+
+body.login, .login-page {
+    background: radial-gradient(circle at 50% 30%, #ffffff 0%, #f6f5f0 75%) !important;
+    min-height: 100vh !important;
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+}
+
+body.login::before, .login-page::before, .login-bg {
+    display: none !important;
+}
+
+body.login .login-container, 
+body.login .login-box, 
+body.login form[action*="login"] {
+    background: #ffffff !important;
+    border-radius: 24px !important;
+    border: 1px solid #edeae2 !important;
+    box-shadow: 0 12px 40px rgba(27, 42, 74, 0.06), 0 2px 8px rgba(0, 0, 0, 0.02) !important;
+    padding: 40px 36px 36px 36px !important;
+    max-width: 400px !important;
+    width: 90% !important;
+    position: relative !important;
+    overflow: visible !important;
+}
+
+body.login .login-container::before {
+    content: "";
+    position: absolute;
+    top: -45px;
+    left: 50%;
+    transform: translateX(-50%);
+    width: 90px;
+    height: 90px;
+    border-radius: 50%;
+    background: rgba(201, 147, 62, 0.12);
+    border: 1px solid rgba(201, 147, 62, 0.35);
+    z-index: 1;
+    animation: login-wave 3s infinite cubic-bezier(0, 0.2, 0.8, 1);
+}
+
+body.login .login-container::after {
+    content: "5G";
+    position: absolute;
+    top: -35px;
+    left: 50%;
+    transform: translateX(-50%);
+    width: 70px;
+    height: 70px;
+    border-radius: 50%;
+    background: linear-gradient(135deg, #2c4c7a 0%, #182d49 100%);
+    color: #ffffff;
+    font-weight: 800;
+    font-size: 20px;
+    letter-spacing: 1px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    box-shadow: 0 8px 20px rgba(44, 76, 122, 0.28);
+    border: 3px solid #ffffff;
+    z-index: 2;
+    animation: float-badge 3.5s ease-in-out infinite;
+}
+
+body.login h2, 
+body.login form[action*="login"] legend {
+    font-size: 20px !important;
+    font-weight: 700 !important;
+    color: #1e1e1e !important;
+    text-align: center !important;
+    margin-top: 35px !important;
+    margin-bottom: 6px !important;
+}
+
+body.login input[type="text"],
+body.login input[type="password"] {
+    background: #fbfaf7 !important;
+    border: 1px solid #edeae2 !important;
+    border-radius: 12px !important;
+    padding: 12px 16px !important;
+    font-size: 14px !important;
+    color: #1e1e1e !important;
+    width: 100% !important;
+    box-sizing: border-box !important;
+    transition: all 0.25s ease !important;
+}
+
+body.login input[type="text"]:focus,
+body.login input[type="password"]:focus {
+    border-color: #c9933e !important;
+    background: #ffffff !important;
+    box-shadow: 0 0 0 3px rgba(201, 147, 62, 0.15) !important;
+    outline: none !important;
+}
+
+body.login input[type="submit"],
+body.login .cbi-button-action {
+    background: linear-gradient(135deg, #c9933e 0%, #b8822f 100%) !important;
+    border: none !important;
+    border-radius: 12px !important;
+    color: #ffffff !important;
+    font-weight: 600 !important;
+    font-size: 15px !important;
+    padding: 12px !important;
+    width: 100% !important;
+    margin-top: 14px !important;
+    cursor: pointer !important;
+    box-shadow: 0 6px 16px rgba(201, 147, 62, 0.25) !important;
+    transition: all 0.25s ease !important;
+}
+
+/* ==========================================================================
+   2.5 系统级自适应深色模式与磨砂毛玻璃 HUD 增强
+   ========================================================================== */
+@media (prefers-color-scheme: dark) {
+    :root {
+        --cpe-bg-main: #121316 !important;
+        --cpe-bg-card: rgba(26, 28, 34, 0.85) !important;
+        --cpe-bg-sidebar: #181a20 !important;
+        --cpe-border: rgba(255, 255, 255, 0.08) !important;
+        --myos-text-primary: #F2F2F7 !important;
+        --myos-text-secondary: #98989D !important;
+    }
+}
+
+html, body {
+    -webkit-tap-highlight-color: transparent !important;
+    padding-bottom: env(safe-area-inset-bottom) !important;
+}
+
+.cbi-map > .cbi-section,
+#maincontent > .panel,
+#maincontent > .card,
+.myos-card {
+    backdrop-filter: blur(20px) !important;
+    -webkit-backdrop-filter: blur(20px) !important;
+}
+
+.myos-telemetry-pill {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 12px;
+    background: rgba(0, 0, 0, 0.04);
+    border: 1px solid var(--cpe-border, #edeae2);
+    padding: 6px 18px;
+    border-radius: 999px;
+    font-size: 12px;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, monospace;
+    color: var(--myos-text-primary, #1c1c1e);
+    margin-top: 16px;
+}
+
+/* ==========================================================================
+   3. 移动端 (手机/竖屏平板) 响应式弹性自适应
+   ========================================================================== */
+@media (max-width: 768px) {
+    #maincontent {
+        padding: 12px 14px !important;
+    }
+    .myos-dashboard {
+        grid-template-columns: 1fr !important;
+        gap: 14px !important;
+    }
+    .model-canvas {
+        min-height: 330px !important;
+        padding: 16px !important;
+    }
+    .device-model-svg {
+        width: 100% !important;
+        max-width: 290px !important;
+        height: auto !important;
+    }
+    .wave-base {
+        width: 220px !important;
+        height: 70px !important;
+        bottom: 55px !important;
+    }
+}
+EOF
+
+# 2. 编译期物理固化 (加上 chmod 确保写入成功，安全排除符号链接递归死循环)
+for CSS_FILE in $(find package/ feeds/ -type f -name "cascade.css" 2>/dev/null | grep "argon"); do
+    chmod +w "$CSS_FILE" 2>/dev/null || true
+    if ! grep -Fq "cpe_myos_override.css" "$CSS_FILE"; then
+        echo '@import url("/luci-static/resources/cpe_myos_override.css");' >> "$CSS_FILE"
+    fi
+done
+
+# 3. 部署健壮版 CPE 聚合看板 (彻底消除 null/undefined 异常隐患)
+mkdir -p package/base-files/files/www/luci-static/resources/view/status || true
+cat << 'EOF' > package/base-files/files/www/luci-static/resources/view/status/cpe_dashboard.js
+'use strict';
+'require view';
+'require fs';
+'require ui';
+'require rpc';
+
+var callSystemInfo = rpc.declare({
+	object: 'system',
+	method: 'info'
+});
+
+var callNetworkDevices = rpc.declare({
+	object: 'network.device',
+	method: 'status'
+});
+
+return view.extend({
+	load: function() {
+		return Promise.all([
+			callSystemInfo().catch(function() { return {}; }),
+			fs.lines('/proc/net/arp').catch(function() { return []; }),
+			callNetworkDevices().catch(function() { return {}; })
+		]);
+	},
+
+	render: function(data) {
+		var info = (data && typeof data[0] === 'object' && data[0] !== null) ? data[0] : {};
+		var arpLines = (data && Array.isArray(data[1])) ? data[1] : [];
+		var netDevs = (data && typeof data[2] === 'object' && data[2] !== null) ? data[2] : {};
+
+		var clientCount = 0;
+		if (Array.isArray(arpLines)) {
+			clientCount = arpLines.filter(function(line) {
+				if (typeof line !== 'string') return false;
+				var p = line.trim().split(/\s+/);
+				return p.length >= 6 && p[2] === '0x2' && p[3] !== '00:00:00:00:00:00';
+			}).length;
+		}
+
+		var f50Online = false;
+		if (netDevs['f50'] && netDevs['f50'].up) f50Online = true;
+		else if (netDevs['eth2'] && netDevs['eth2'].up) f50Online = true;
+		else if (netDevs['usb0'] && netDevs['usb0'].up) f50Online = true;
+
+		var totalMem = Math.round((info.memory && typeof info.memory.total === 'number' ? info.memory.total : 536870912) / 1048576);
+		var freeMem = Math.round((info.memory && typeof info.memory.free === 'number' ? info.memory.free : 268435456) / 1048576);
+		var usedMem = Math.max(0, totalMem - freeMem);
+		var memPercent = totalMem > 0 ? Math.round((usedMem / totalMem) * 100) : 0;
+
+		var styleNode = E('style', {}, [
+			'@keyframes ripple-wave { 0% { transform: scale(0.8); opacity: 0.8; } 100% { transform: scale(1.4); opacity: 0; } }',
+			'@keyframes f50-pulse { 0%, 100% { filter: drop-shadow(0 0 4px #00e676); } 50% { filter: drop-shadow(0 0 10px #00e676); } }',
+			'@keyframes led-blink { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }',
+			'.myos-dashboard { display: grid; grid-template-columns: 1.35fr 1fr; gap: 20px; margin-bottom: 24px; }',
+			'.myos-card { background: var(--cpe-bg-card, #ffffff); border-radius: 20px; border: 1px solid var(--cpe-border, #edeae2); box-shadow: 0 4px 20px rgba(0,0,0,0.025); padding: 24px; position: relative; }',
+			'.model-canvas { display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 400px; position: relative; overflow: hidden; }',
+			'.wave-base { position: absolute; width: 280px; height: 90px; border-radius: 50%; border: 2px solid ' + (f50Online ? 'rgba(41, 128, 185, 0.45)' : 'rgba(160, 160, 160, 0.3)') + '; bottom: 65px; z-index: 1; animation: ripple-wave 2.8s infinite cubic-bezier(0, 0.2, 0.8, 1); }',
+			'.wave-base-2 { animation-delay: 1.4s; }',
+			'.device-model-svg { z-index: 2; filter: drop-shadow(0 16px 24px rgba(27, 42, 74, 0.16)); transition: transform 0.3s ease; }',
+			'.device-model-svg:hover { transform: translateY(-3px); }',
+			'.stat-grid-right { display: flex; flex-direction: column; gap: 16px; }',
+			'.status-pill { display: inline-flex; align-items: center; padding: 4px 12px; border-radius: 20px; font-size: 12px; font-weight: 500; }',
+			'.pill-online { background: #eafaf1; color: #27ae60; }',
+			'.pill-offline { background: #fdf2e9; color: #e67e22; }'
+		]);
+
+		var deviceSvg = '<svg class="device-model-svg" width="340" height="260" viewBox="0 0 340 260" fill="none" xmlns="http://www.w3.org/2000/svg">' +
+			'<defs>' +
+				'<linearGradient id="trBlueBody" x1="0%" y1="0%" x2="0%" y2="100%">' +
+					'<stop offset="0%" stop-color="#2c4c7a" />' +
+					'<stop offset="40%" stop-color="#243f66" />' +
+					'<stop offset="100%" stop-color="#182d49" />' +
+				'</linearGradient>' +
+				'<linearGradient id="trAntenna" x1="0%" y1="0%" x2="100%" y2="0%">' +
+					'<stop offset="0%" stop-color="#213b61" />' +
+					'<stop offset="50%" stop-color="#34588c" />' +
+					'<stop offset="100%" stop-color="#1a2e4c" />' +
+				'</linearGradient>' +
+				'<linearGradient id="f50White" x1="0%" y1="0%" x2="100%" y2="100%">' +
+					'<stop offset="0%" stop-color="#法语F" />' +
 					'<stop offset="60%" stop-color="#F7F8FA" />' +
 					'<stop offset="100%" stop-color="#E5E9F0" />' +
 				'</linearGradient>' +
