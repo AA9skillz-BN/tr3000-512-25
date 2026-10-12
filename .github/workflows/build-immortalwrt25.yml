@@ -64,11 +64,7 @@ jobs:
 
     - name: Load custom configuration
       run: |
-        chmod +x $DIY_P2_SH
-        cd openwrt
-        $GITHUB_WORKSPACE/$DIY_P2_SH || true
-
-        # 匹配配置源文件
+        # 1. 优先匹配并复制配置文件到构建目录
         cd $GITHUB_WORKSPACE
         if [ -f "$CONFIG_FILE" ]; then
             echo "Found config at $CONFIG_FILE"
@@ -77,6 +73,11 @@ jobs:
             echo "Found config at root .config"
             cp -f ".config" openwrt/.config
         fi
+
+        # 2. 后执行 DIY 脚本（确保第15节的内核与模块依赖能够正确追加至 .config 尾部）
+        chmod +x $DIY_P2_SH
+        cd openwrt
+        $GITHUB_WORKSPACE/$DIY_P2_SH || true
         exit 0
 
     - name: Download package
