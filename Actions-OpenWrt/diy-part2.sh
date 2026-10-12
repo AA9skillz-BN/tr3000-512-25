@@ -647,6 +647,48 @@ body.login .cbi-button-action {
 }
 
 /* ==========================================================================
+   2.5 系统级自适应深色模式与磨砂毛玻璃 HUD 增强
+   ========================================================================== */
+@media (prefers-color-scheme: dark) {
+    :root {
+        --cpe-bg-main: #121316 !important;
+        --cpe-bg-card: rgba(26, 28, 34, 0.85) !important;
+        --cpe-bg-sidebar: #181a20 !important;
+        --cpe-border: rgba(255, 255, 255, 0.08) !important;
+        --myos-text-primary: #F2F2F7 !important;
+        --myos-text-secondary: #98989D !important;
+    }
+}
+
+html, body {
+    -webkit-tap-highlight-color: transparent !important;
+    padding-bottom: env(safe-area-inset-bottom) !important;
+}
+
+.cbi-map > .cbi-section,
+#maincontent > .panel,
+#maincontent > .card,
+.myos-card {
+    backdrop-filter: blur(20px) !important;
+    -webkit-backdrop-filter: blur(20px) !important;
+}
+
+.myos-telemetry-pill {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 12px;
+    background: rgba(0, 0, 0, 0.04);
+    border: 1px solid var(--cpe-border, #edeae2);
+    padding: 6px 18px;
+    border-radius: 999px;
+    font-size: 12px;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, monospace;
+    color: var(--myos-text-primary, #1c1c1e);
+    margin-top: 16px;
+}
+
+/* ==========================================================================
    3. 移动端 (手机/竖屏平板) 响应式弹性自适应
    ========================================================================== */
 @media (max-width: 768px) {
@@ -948,52 +990,6 @@ CONFIG_PACKAGE_kmod-nft-nat=y
 CONFIG_PACKAGE_kmod-veth=y
 CONFIG_PACKAGE_ip-full=y
 CONFIG_PACKAGE_ca-bundle=y
-EOF
-
-# ==============================================================================
-# 16. CPE-MYOS 深度美化层 (深色模式/磨砂玻璃/全段遥测HUD/全面屏安全区)
-# ==============================================================================
-cat << 'EOF' >> package/base-files/files/www/luci-static/resources/cpe_myos_override.css
-
-/* --- 补充：深色模式与磨砂玻璃扩展 --- */
-@media (prefers-color-scheme: dark) {
-  :root {
-    --cpe-bg-main: #121316 !important;
-    --cpe-bg-card: rgba(26, 28, 34, 0.85) !important;
-    --cpe-bg-sidebar: #181a20 !important;
-    --cpe-border: rgba(255, 255, 255, 0.08) !important;
-    --myos-text-primary: #F2F2F7 !important;
-    --myos-text-secondary: #98989D !important;
-  }
-}
-
-html, body {
-  -webkit-tap-highlight-color: transparent !important;
-  padding-bottom: env(safe-area-inset-bottom) !important;
-}
-
-.cbi-map > .cbi-section,
-#maincontent > .panel,
-#maincontent > .card,
-.myos-card {
-  backdrop-filter: blur(20px) !important;
-  -webkit-backdrop-filter: blur(20px) !important;
-}
-
-.myos-telemetry-pill {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 12px;
-  background: rgba(0, 0, 0, 0.04);
-  border: 1px solid var(--cpe-border, #edeae2);
-  padding: 6px 18px;
-  border-radius: 999px;
-  font-size: 12px;
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, monospace;
-  color: var(--myos-text-primary, #1c1c1e);
-  margin-top: 16px;
-}
 EOF
 
 exit 0
