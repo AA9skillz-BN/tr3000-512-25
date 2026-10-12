@@ -1,16 +1,22 @@
-name: Build ImmortalWrt 25.x for Cudy TR3000 (512MB)
+name: Build ImmortalWrt (VIKINGYFY 25.x / 512M)
 
 on:
   repository_dispatch:
   workflow_dispatch:
+  schedule:
+    # 国际标准时间(UTC) 每周一 19:00 -> 即北京时间每周二凌晨 03:00 自动触发编译
+    - cron: '0 19 * * 1'
+
+permissions:
+  contents: write
 
 env:
-  REPO_URL: https://github.com/immortalwrt/immortalwrt
-  REPO_BRANCH: openwrt-24.10
-  FEEDS_CONF: feeds.conf.default
+  REPO_URL: https://github.com/VIKINGYFY/immortalwrt.git
+  REPO_BRANCH: owrt
+  FEEDS_CONF: Actions-OpenWrt/feeds.conf.default
   CONFIG_FILE: openwrt-mod/.config
-  DIY_P1_SH: diy-part1.sh
-  DIY_P2_SH: diy-part2.sh
+  DIY_P1_SH: Actions-OpenWrt/diy-part1.sh
+  DIY_P2_SH: Actions-OpenWrt/diy-part2.sh
   UPLOAD_BIN_DIR: false
   UPLOAD_FIRMWARE: true
   UPLOAD_RELEASE: true
@@ -29,15 +35,8 @@ jobs:
         DEBIAN_FRONTEND: noninteractive
       run: |
         sudo rm -rf /etc/apt/sources.list.d/* /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
-        sudo docker image prune -a -f
         sudo -E apt-get -qq update
-        sudo -E apt-get -qq install -y ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential \
-          bzip2 ccache cmake cpio curl device-tree-compiler fastjar flex gawk gettext gcc-multilib g++-multilib \
-          git gperf haveged help2man intltool libc6-dev-i386 libelf-dev libfuse-dev libglib2.0-dev libgmp3-dev \
-          libltdl-dev libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev libpython3-dev libreadline-dev \
-          libssl-dev libtool lrzsz mkisofs msmtp nano ninja-build p7zip p7zip-full patch pkgconf python3 \
-          python3-pyelftools python3-setuptools qemu-utils rsync scons squashfs-tools subversion swig texinfo \
-          uglifyjs upx-ucl unzip vim wget xmlto xxd zlib1g-dev
+        sudo -E apt-get -qq install -y $(cat Actions-OpenWrt/depends.txt 2>/dev/null || echo "ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential bzip2 ccache cmake cpio curl device-tree-compiler fastjar flex gawk gettext gcc-multilib g++-multilib git gperf haveged help2man intltool libc6-dev-i386 libelf-dev libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev libreadline-dev libssl-dev libtool lrzsz mkisofs msmtp nano ninja-build p7zip p7zip-full patch pkgconf python3 python3-pip libpython3-dev qemu-utils rsync scons squashfs-tools subversion swig texinfo uglifyjs upx-ucl unzip vim wget xmlto xxd zlib1g-dev")
         sudo -E apt-get -qq autoremove --purge
         sudo -E apt-get -qq clean
         sudo timedatectl set-timezone "$TZ"
@@ -47,7 +46,6 @@ jobs:
     - name: Clone source code
       working-directory: /workdir
       run: |
-        df -h
         git clone $REPO_URL -b $REPO_BRANCH openwrt
         ln -sf /workdir/openwrt $GITHUB_WORKSPACE/openwrt
 
@@ -56,7 +54,7 @@ jobs:
         [ -e $FEEDS_CONF ] && cp $FEEDS_CONF openwrt/feeds.conf.default
         chmod +x $DIY_P1_SH
         cd openwrt
-        $GITHUB_WORKSPACE/$DIY_P1_SH
+        $GITHUB_WORKSPACE/$DIY_P1_SH || true
 
     - name: Update feeds
       run: cd openwrt && ./scripts/feeds update -a
@@ -66,16 +64,39 @@ jobs:
 
     - name: Load custom configuration
       run: |
-        [ -e files ] && mv files openwrt/files
-        [ -e $CONFIG_FILE ] && cp -f $CONFIG_FILE openwrt/.config
         chmod +x $DIY_P2_SH
         cd openwrt
-        $GITHUB_WORKSPACE/$DIY_P2_SH
+        $GITHUB_WORKSPACE/$DIY_P2_SH || true
+
+        # 匹配配置源文件
+        cd $GITHUB_WORKSPACE
+        if [ -f "$CONFIG_FILE" ]; then
+            echo "Found config at $CONFIG_FILE"
+            cp -f "$CONFIG_FILE" openwrt/.config
+        elif [ -f ".config" ]; then
+            echo "Found config at root .config"
+            cp -f ".config" openwrt/.config
+        fi
+        exit 0
 
     - name: Download package
       id: package
       run: |
         cd openwrt
+        # 严格锁定编译目标为 cudy_tr3000-512mb-v1
+        sed -i 's/CONFIG_TARGET_mediatek_filogic_DEVICE_.*=y/CONFIG_TARGET_mediatek_filogic_DEVICE_cudy_tr3000-512mb-v1=y/g' .config 2>/dev/null || true
+        echo "CONFIG_TARGET_mediatek=y" >> .config
+        echo "CONFIG_TARGET_mediatek_filogic=y" >> .config
+        echo "CONFIG_TARGET_mediatek_filogic_DEVICE_cudy_tr3000-512mb-v1=y" >> .config
+
+        # 依赖锁：强制激活无线协议栈与 MT7981 驱动，避免 defconfig 自动去除
+        echo "CONFIG_PACKAGE_kmod-mac80211=y" >> .config
+        echo "CONFIG_PACKAGE_kmod-mt76-core=y" >> .config
+        echo "CONFIG_PACKAGE_kmod-mt76-connac=y" >> .config
+        echo "CONFIG_PACKAGE_kmod-mt7915e=y" >> .config
+        echo "CONFIG_PACKAGE_kmod-mt7981-firmware=y" >> .config
+        echo "CONFIG_PACKAGE_mt7981-wo-firmware=y" >> .config
+
         make defconfig
         make download -j8
         find dl -size -1024c -exec ls -l {} \;
@@ -86,26 +107,34 @@ jobs:
       run: |
         cd openwrt
         echo -e "$(nproc) thread compile"
-        make -j$(nproc) || make -j1 || make -j1 V=s
-        echo "status=success" >> $GITHUB_OUTPUT
-        grep '^CONFIG_TARGET.*DEVICE.*=y' .config | sed -r 's/.*DEVICE_(.*)=y/\1/' > DEVICE_NAME
-        [ -s DEVICE_NAME ] && echo "DEVICE_NAME=_$(cat DEVICE_NAME)" >> $GITHUB_ENV
-        echo "FILE_DATE=_$(date +"%Y%m%d%H%M")" >> $GITHUB_ENV
+        
+        # 1. 预先构建 Host 工具与交叉编译工具链
+        make tools/compile -j$(nproc) || make tools/compile -j1 V=s
+        make toolchain/compile -j$(nproc) || make toolchain/compile -j1 V=s
 
-    - name: Check space usage
-      if: (!cancelled())
-      run: df -hT
+        # 2. 顶层统管全流程构建 (原生适配 25.x apk 索引、rootfs 部署与固件生成)
+        make -j$(nproc) || make -j1 V=s
+        
+        echo "status=success" >> $GITHUB_OUTPUT
+        echo "DEVICE_NAME=_cudy_tr3000-512mb-v1" >> $GITHUB_ENV
+        echo "FILE_DATE=_$(date +"%Y%m%d%H%M")" >> $GITHUB_ENV
 
     - name: Organize files
       id: organize
-      if: env.UPLOAD_FIRMWARE == 'true' && !cancelled()
+      if: steps.compile.outputs.status == 'success' && !cancelled()
       run: |
+        mkdir -p /tmp/firmware_out
         cd openwrt/bin/targets/*/*
-        rm -rf packages
-        echo "FIRMWARE=$PWD" >> $GITHUB_ENV
+        
+        # 提取目标机型专属固件、sysupgrade 镜像及 sha256 校验文件
+        cp -f *cudy_tr3000-512mb-v1*.bin /tmp/firmware_out/ 2>/dev/null || true
+        cp -f *sysupgrade.bin /tmp/firmware_out/ 2>/dev/null || true
+        cp -f sha256sums /tmp/firmware_out/ 2>/dev/null || true
+        
+        echo "FIRMWARE=/tmp/firmware_out" >> $GITHUB_ENV
         echo "status=success" >> $GITHUB_OUTPUT
 
-    - name: Upload firmware directory
+    - name: Upload firmware directory to Artifacts
       uses: actions/upload-artifact@v4
       if: steps.organize.outputs.status == 'success' && !cancelled()
       with:
@@ -114,11 +143,16 @@ jobs:
 
     - name: Generate release tag
       id: tag
-      if: env.UPLOAD_RELEASE == 'true' && !cancelled()
+      if: env.UPLOAD_RELEASE == 'true' && steps.compile.outputs.status == 'success' && !cancelled()
       run: |
-        echo "release_tag=$(date +"%Y.%m.%d-%H%M")" >> $GITHUB_OUTPUT
+        echo "release_tag=ImmortalWrt-$(date +"%Y.%m.%d-%H%M")" >> $GITHUB_OUTPUT
         touch release.txt
-        echo "ImmortalWrt 25.x 固件自动构建 (Cudy TR3000 512MB RAM 深度优化版)" >> release.txt
+        echo "🚀 Cudy TR3000 (512MB Flash) 专属固件发布" >> release.txt
+        echo "--------------------------------------------------" >> release.txt
+        echo "• 源码分支: VIKINGYFY/immortalwrt (owrt 25.x / Linux 6.18)" >> release.txt
+        echo "• 默认后台: 192.168.6.1" >> release.txt
+        echo "• 硬件分区: U-Boot 请选择 mod-490 布局" >> release.txt
+        echo "• 预置功能: 中兴 F50 5G 即插即用 / MTK 硬件流量分载 / OpenClash 25.x 运行栈 / 安全校验在线升级" >> release.txt
         echo "status=success" >> $GITHUB_OUTPUT
 
     - name: Upload firmware to release
@@ -130,3 +164,13 @@ jobs:
         tag_name: ${{ steps.tag.outputs.release_tag }}
         body_path: release.txt
         files: ${{ env.FIRMWARE }}/*
+
+    - name: Delete older releases (保留最新 3 个)
+      uses: dev-drprasad/delete-older-releases@v0.3.3
+      if: steps.tag.outputs.status == 'success' && !cancelled()
+      continue-on-error: true
+      with:
+        keep_latest: 3
+        delete_tags: true
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
