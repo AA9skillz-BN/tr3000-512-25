@@ -473,7 +473,7 @@ EOF
 chmod +x package/base-files/files/etc/uci-defaults/99-f50-watchdog-cron || true
 
 # ==============================================================================
-# 14. 注入标准兼容版 CPE-MYOS 深度美化层 (防污染作用域 + 动效登录页 + 双保险注入)
+# 14. 注入标准兼容版 CPE-MYOS 深度美化层 (防污染作用域 + 动效登录页 + 健壮渲染容错)
 # ==============================================================================
 
 # 1. 编译期部署独立样式表
@@ -535,7 +535,6 @@ cat << 'EOF' > package/base-files/files/www/luci-static/resources/cpe_myos_overr
     50% { transform: translateY(-5px); }
 }
 
-/* 仅在登录状态下接管全屏背景 */
 body.login, .login-page {
     background: radial-gradient(circle at 50% 30%, #ffffff 0%, #f6f5f0 75%) !important;
     min-height: 100vh !important;
@@ -548,7 +547,6 @@ body.login::before, .login-page::before, .login-bg {
     display: none !important;
 }
 
-/* 核心悬浮卡片容器 (必须限制在 body.login 作用域内) */
 body.login .login-container, 
 body.login .login-box, 
 body.login form[action*="login"] {
@@ -563,7 +561,6 @@ body.login form[action*="login"] {
     overflow: visible !important;
 }
 
-/* 登录卡片上方动态光晕徽标 */
 body.login .login-container::before {
     content: "";
     position: absolute;
@@ -677,14 +674,15 @@ body.login .cbi-button-action {
 }
 EOF
 
-# 2. 编译期物理固化：全盘深度检索并写入 Argon 的 cascade.css
-find package/ feeds/ -name "cascade.css" 2>/dev/null | grep "argon" | while read -r f; do
-    if ! grep -Fq "cpe_myos_override.css" "$f"; then
-        echo "@import url(\"/luci-static/resources/cpe_myos_override.css\");" >> "$f"
+# 2. 编译期物理固化 (加上 chmod 确保写入成功，安全排除符号链接递归死循环)
+for CSS_FILE in $(find package/ feeds/ -type f -name "cascade.css" 2>/dev/null | grep "argon"); do
+    chmod +w "$CSS_FILE" 2>/dev/null || true
+    if ! grep -Fq "cpe_myos_override.css" "$CSS_FILE"; then
+        echo '@import url("/luci-static/resources/cpe_myos_override.css");' >> "$CSS_FILE"
     fi
 done
 
-# 3. 部署健壮版 CPE 聚合看板
+# 3. 部署健壮版 CPE 聚合看板 (彻底消除 null/undefined 异常隐患)
 mkdir -p package/base-files/files/www/luci-static/resources/view/status || true
 cat << 'EOF' > package/base-files/files/www/luci-static/resources/view/status/cpe_dashboard.js
 'use strict';
@@ -713,22 +711,26 @@ return view.extend({
 	},
 
 	render: function(data) {
-		var info = data[0] || {};
-		var arpLines = data[1] || [];
-		var netDevs = data[2] || {};
+		var info = (data && typeof data[0] === 'object' && data[0] !== null) ? data[0] : {};
+		var arpLines = (data && Array.isArray(data[1])) ? data[1] : [];
+		var netDevs = (data && typeof data[2] === 'object' && data[2] !== null) ? data[2] : {};
 
 		var clientCount = 0;
 		if (Array.isArray(arpLines)) {
 			clientCount = arpLines.filter(function(line) {
+				if (typeof line !== 'string') return false;
 				var p = line.trim().split(/\s+/);
 				return p.length >= 6 && p[2] === '0x2' && p[3] !== '00:00:00:00:00:00';
 			}).length;
 		}
 
-		var f50Online = !!((netDevs['f50'] && netDevs['f50'].up) || (netDevs['eth2'] && netDevs['eth2'].up) || (netDevs['usb0'] && netDevs['usb0'].up));
+		var f50Online = false;
+		if (netDevs['f50'] && netDevs['f50'].up) f50Online = true;
+		else if (netDevs['eth2'] && netDevs['eth2'].up) f50Online = true;
+		else if (netDevs['usb0'] && netDevs['usb0'].up) f50Online = true;
 
-		var totalMem = Math.round((info.memory && info.memory.total ? info.memory.total : 536870912) / 1048576);
-		var freeMem = Math.round((info.memory && info.memory.free ? info.memory.free : 268435456) / 1048576);
+		var totalMem = Math.round((info.memory && typeof info.memory.total === 'number' ? info.memory.total : 536870912) / 1048576);
+		var freeMem = Math.round((info.memory && typeof info.memory.free === 'number' ? info.memory.free : 268435456) / 1048576);
 		var usedMem = Math.max(0, totalMem - freeMem);
 		var memPercent = totalMem > 0 ? Math.round((usedMem / totalMem) * 100) : 0;
 
@@ -882,7 +884,7 @@ return view.extend({
 });
 EOF
 
-# 4. 注册菜单与精准 RPCD ACL 权限
+# 4. 注册菜单与精准 RPCD ACL 权限 (标准化挂载至 admin/status)
 mkdir -p package/base-files/files/usr/share/luci/menu.d || true
 cat << 'EOF' > package/base-files/files/usr/share/luci/menu.d/luci-app-cpe-overview.json
 {
@@ -892,6 +894,9 @@ cat << 'EOF' > package/base-files/files/usr/share/luci/menu.d/luci-app-cpe-overv
 		"action": {
 			"type": "view",
 			"path": "status/cpe_dashboard"
+		},
+		"depends": {
+			"acl": [ "luci-app-cpe-overview" ]
 		}
 	}
 }
