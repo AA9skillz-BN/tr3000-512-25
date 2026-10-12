@@ -368,14 +368,39 @@ return view.extend({
 });
 EOF
 
-# 8. 预置中兴 F50 免驱支持与 MTU 1420 蜂窝网优化
+# 8. 预置中兴 F50 免驱支持、MTU 1420 及防限速 TTL/HL=64 锁定 (动态绑定，绝不写死)
 mkdir -p package/base-files/files/etc/uci-defaults || true
+
+# 8.1 部署底层 nftables TTL 锁定脚本 (物理固化进系统镜像)
+cat << 'EOF' > package/base-files/files/etc/firewall.ttl
+#!/bin/sh
+# 针对 F50 物理网卡出口强制锁定 IPv4 TTL=64 与 IPv6 Hop Limit=64
+nft add chain inet fw4 f50_ttl '{ type filter hook postrouting priority 300; policy accept; }' 2>/dev/null
+nft flush chain inet fw4 f50_ttl 2>/dev/null
+nft add rule inet fw4 f50_ttl oifname '{ "eth2", "usb0" }' ip ttl set 64 2>/dev/null
+nft add rule inet fw4 f50_ttl oifname '{ "eth2", "usb0" }' ip6 hoplimit set 64 2>/dev/null
+EOF
+chmod +x package/base-files/files/etc/firewall.ttl || true
+
+# 8.2 开机自动绑定网络接口与防火墙触发规则 (按需动态识别设备节点)
 cat << 'EOF' > package/base-files/files/etc/uci-defaults/99-f50-hotplug
 uci set network.f50=interface
 uci set network.f50.proto='dhcp'
-uci set network.f50.device='eth2'
 uci set network.f50.metric='20'
 uci set network.f50.mtu='1420'
+
+# 动态探测当前已就绪的 5G 网卡设备 (usb0 或 eth2)
+DEV=""
+if [ -d "/sys/class/net/usb0" ]; then
+    DEV="usb0"
+elif [ -d "/sys/class/net/eth2" ]; then
+    DEV="eth2"
+fi
+
+# 仅在开机已识别到硬件时预设设备名，未插卡时保持未绑定，交由第 9 节热插拔脚本动态接管
+if [ -n "$DEV" ]; then
+    uci set network.f50.device="$DEV"
+fi
 uci commit network
 
 for i in $(seq 0 10); do
@@ -386,6 +411,14 @@ for i in $(seq 0 10); do
         break
     fi
 done
+
+# 注册 TTL 防火墙脚本到 firewall4
+uci -q delete firewall.f50_ttl
+uci set firewall.f50_ttl=include
+uci set firewall.f50_ttl.type='script'
+uci set firewall.f50_ttl.path='/etc/firewall.ttl'
+uci set firewall.f50_ttl.reload='1'
+uci commit firewall
 
 exit 0
 EOF
