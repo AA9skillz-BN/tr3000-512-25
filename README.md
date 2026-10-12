@@ -4,7 +4,7 @@
 [![Flash](https://img.shields.io/badge/Flash-512MB%20SPI--NAND-brightgreen.svg)]()
 [![Modem](https://img.shields.io/badge/Modem-ZTE%20F50%205G-blueviolet.svg)]()
 [![GitHub Release](https://img.shields.io/github/v/release/AA9skillz-BN/tr3000-512-25?style=flat-square)](https://github.com/AA9skillz-BN/tr3000-512-25/releases)
-专为 **Cudy TR3000（硬改 512MB 闪存）** 与 **中兴 ZTE F50 5G 随身 WiFi** 强强联手打造的企业级便携 5G CPE 定制固件。基于现代 OpenWrt/ImmortalWrt 25.x 底层开发，兼具高度硬件适配、蜂窝防断流自愈机制以及深度定制的 MYOS 暖白质感拟真交互大屏。
+专为 **Cudy TR3000（硬改 512MB 闪存）** 与 **中兴 ZTE F50 5G 随身 WiFi** 强强联手打造的企业级便携 5G CPE 定制固件。基于现代 OpenWrt/ImmortalWrt 25.x 底层开发，兼具高度硬件适配、蜂窝防断流自愈机制以及深度定制的暖白质感拟真交互大屏。
 ---
 ## 🌟 核心特性
 ### 1. 512MB SPI-NAND 空间完全释放
