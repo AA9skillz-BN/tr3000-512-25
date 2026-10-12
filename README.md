@@ -58,7 +58,7 @@
 ├── diy-part1.sh                # 源码拉取与自定义 Feeds 扩展脚本
 ├── diy-part2.sh                # 核心定制、F50 驱动、看板与 OTA 注入脚本
 └── README.md
-、、、
+```
 
 ---
 ## 鸣谢与致敬
