@@ -411,7 +411,7 @@ EOF
 chmod +x package/base-files/files/etc/hotplug.d/net/99-f50-auto || true
 
 # 10. 声明配置备份白名单（升级时不丢失 OTA 脚本、看门狗与核心配置）
-mkdir -p package/base-files/files/etc/sysupgrade.conf || true
+mkdir -p package/base-files/files/etc || true
 cat << 'EOF' >> package/base-files/files/etc/sysupgrade.conf
 /etc/openclash/
 /usr/bin/auto-update-firmware.sh
