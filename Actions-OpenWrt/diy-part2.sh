@@ -433,30 +433,34 @@ exit 0
 EOF
 chmod +x package/base-files/files/etc/uci-defaults/99-timesync || true
 
-# 12. 部署 F50 自动保活看门狗脚本
+# 12. 部署 F50 自动保活看门狗脚本 (动态绑定实际物理网卡，防止误判断网重启全屋网络)
 cat << 'EOF' > package/base-files/files/usr/bin/f50-watchdog.sh
 #!/bin/sh
 
 TARGET_IP="223.5.5.5"
 LOG_TAG="F50-Watchdog"
 
-# 检查 f50 接口是否存在且已启动
-if ! ip link show f50 >/dev/null 2>&1 && ! ip link show eth2 >/dev/null 2>&1 && ! ip link show usb0 >/dev/null 2>&1; then
+# 动态获取 f50 绑定的真实物理网卡设备名 (eth2 或 usb0)
+DEV=$(uci -q get network.f50.device)
+[ -z "$DEV" ] && DEV="eth2"
+
+# 若物理网卡未插上或未就绪，直接静默退出
+if ! ip link show "$DEV" >/dev/null 2>&1; then
     exit 0
 fi
 
-# 连续检测 3 次，超时 2 秒
-if ! ping -c 3 -W 2 -I f50 $TARGET_IP >/dev/null 2>&1; then
-    logger -t "$LOG_TAG" "检测到 F50 网络失联，正在尝试重新协商 DHCP 与拉起接口..."
+# 必须使用真实的物理设备名 DEV 进行 ping 探测 (ping 无法识别逻辑接口名 f50)
+if ! ping -c 3 -W 2 -I "$DEV" $TARGET_IP >/dev/null 2>&1; then
+    logger -t "$LOG_TAG" "检测到 F50 ($DEV) 网络失联，正在尝试重新协商 DHCP 与拉起接口..."
     ifdown f50
     sleep 2
     ifup f50
     
-    # 二次检测，若仍不通则尝试重载网络子系统
+    # 二次检测，若仍不通则尝试平滑重载网络配置
     sleep 8
-    if ! ping -c 2 -W 2 -I f50 $TARGET_IP >/dev/null 2>&1; then
-        logger -t "$LOG_TAG" "网络仍未恢复，执行网络协议栈重载..."
-        /etc/init.d/network restart
+    if ! ping -c 2 -W 2 -I "$DEV" $TARGET_IP >/dev/null 2>&1; then
+        logger -t "$LOG_TAG" "网络仍未恢复，执行网络平滑重载..."
+        /etc/init.d/network reload
     fi
 fi
 exit 0
