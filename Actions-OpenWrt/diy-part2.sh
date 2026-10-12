@@ -762,7 +762,7 @@ for CSS_FILE in $(find package/ feeds/ -type f -name "cascade.css" 2>/dev/null |
     fi
 done
 
-# 3. 部署健壮版 CPE 聚合看板 (彻底消除 null/undefined 异常隐患)
+# 3. 部署健壮版 CPE 聚合看板 (改用 interface dump 免参原生接口，精准识别在线状态与真实内存)
 mkdir -p package/base-files/files/www/luci-static/resources/view/status || true
 cat << 'EOF' > package/base-files/files/www/luci-static/resources/view/status/cpe_dashboard.js
 'use strict';
@@ -776,9 +776,9 @@ var callSystemInfo = rpc.declare({
 	method: 'info'
 });
 
-var callNetworkDevices = rpc.declare({
-	object: 'network.device',
-	method: 'status'
+var callNetworkInterfaces = rpc.declare({
+	object: 'network.interface',
+	method: 'dump'
 });
 
 return view.extend({
@@ -786,14 +786,14 @@ return view.extend({
 		return Promise.all([
 			callSystemInfo().catch(function() { return {}; }),
 			fs.lines('/proc/net/arp').catch(function() { return []; }),
-			callNetworkDevices().catch(function() { return {}; })
+			callNetworkInterfaces().catch(function() { return { interface: [] }; })
 		]);
 	},
 
 	render: function(data) {
 		var info = (data && typeof data[0] === 'object' && data[0] !== null) ? data[0] : {};
 		var arpLines = (data && Array.isArray(data[1])) ? data[1] : [];
-		var netDevs = (data && typeof data[2] === 'object' && data[2] !== null) ? data[2] : {};
+		var ifaceData = (data && typeof data[2] === 'object' && data[2] !== null && Array.isArray(data[2].interface)) ? data[2].interface : [];
 
 		var clientCount = 0;
 		if (Array.isArray(arpLines)) {
@@ -804,14 +804,24 @@ return view.extend({
 			}).length;
 		}
 
+		// 通过原生 ubus network.interface dump 精准判定 f50 状态与物理绑定
 		var f50Online = false;
-		if (netDevs['f50'] && netDevs['f50'].up) f50Online = true;
-		else if (netDevs['eth2'] && netDevs['eth2'].up) f50Online = true;
-		else if (netDevs['usb0'] && netDevs['usb0'].up) f50Online = true;
+		var activeDevice = '未就绪';
+		for (var i = 0; i < ifaceData.length; i++) {
+			if (ifaceData[i].interface === 'f50') {
+				if (ifaceData[i].up) {
+					f50Online = true;
+					activeDevice = ifaceData[i].l3_device || ifaceData[i].device || 'eth2';
+				}
+				break;
+			}
+		}
 
-		var totalMem = Math.round((info.memory && typeof info.memory.total === 'number' ? info.memory.total : 536870912) / 1048576);
-		var freeMem = Math.round((info.memory && typeof info.memory.free === 'number' ? info.memory.free : 268435456) / 1048576);
-		var usedMem = Math.max(0, totalMem - freeMem);
+		// 内存精准计算：剔除 Buffers 与 Cached 干扰，还原真实物理负载
+		var mem = info.memory || {};
+		var totalMem = Math.round((typeof mem.total === 'number' ? mem.total : 536870912) / 1048576);
+		var availMem = Math.round((typeof mem.available === 'number' ? mem.available : ((mem.free || 0) + (mem.buffered || 0) + (mem.cached || 0))) / 1048576);
+		var usedMem = Math.max(0, totalMem - availMem);
 		var memPercent = totalMem > 0 ? Math.round((usedMem / totalMem) * 100) : 0;
 
 		var styleNode = E('style', {}, [
@@ -919,7 +929,7 @@ return view.extend({
 					E('span', { 'style': 'font-size: 12px; color: #c9933e; font-weight: 500;' }, f50Online ? 'RNDIS / CDC-NCM 正常' : '未连接')
 				]),
 				E('div', { 'style': 'display: grid; grid-template-columns: 1fr 1fr; gap: 8px; font-size: 12px;' }, [
-					E('div', { 'style': 'opacity: 0.7;' }, '设备节点: ' + E('strong', {}, 'f50 (eth2/usb0)')),
+					E('div', { 'style': 'opacity: 0.7;' }, '设备节点: ' + E('strong', {}, activeDevice)),
 					E('div', { 'style': 'opacity: 0.7;' }, '优化 MTU: ' + E('strong', {}, '1420')),
 					E('div', { 'style': 'opacity: 0.7;' }, '保活巡检: ' + E('strong', {}, '3分钟心跳自愈')),
 					E('div', { 'style': 'opacity: 0.7;' }, '硬件加速: ' + E('strong', {}, 'MTK PPE Offload'))
@@ -939,11 +949,11 @@ return view.extend({
 				]),
 				E('div', { 'style': 'font-size: 14px; font-weight: 600; color: #c9933e;' }, memPercent + '% 已载入')
 			]),
-			E('div', { 'style': 'width: 100%; height: 10px; background: rgba(0,0,0,0.06); border-radius: 6px; overflow: hidden; display: flex; margin-bottom: 8px;' }, [
+			E('div', { 'width': '100%', 'height': '10px', 'style': 'width: 100%; height: 10px; background: rgba(0,0,0,0.06); border-radius: 6px; overflow: hidden; display: flex; margin-bottom: 8px;' }, [
 				E('div', { 'style': 'width: ' + memPercent + '%; background: linear-gradient(90deg, #c9933e, #f1c40f); height: 100%; border-radius: 6px;' })
 			]),
 			E('div', { 'style': 'display: flex; justify-content: space-between; font-size: 12px; opacity: 0.75;' }, [
-				E('span', {}, 'RAM 占用: ' + usedMem + ' MB / ' + totalMem + ' MB'),
+				E('span', {}, 'RAM 真实负载: ' + usedMem + ' MB / ' + totalMem + ' MB'),
 				E('span', {}, 'RootFS Overlay 可用: ' + E('strong', { 'style': 'color: #27ae60;' }, '~430 MB+ (超充裕空间)'))
 			])
 		]);
@@ -964,7 +974,7 @@ return view.extend({
 });
 EOF
 
-# 4. 注册菜单与精准 RPCD ACL 权限 (标准化挂载至 admin/status)
+# 4. 注册菜单与精准 RPCD ACL 权限 (标准化挂载至 admin/status 并开放 interface dump 权限)
 mkdir -p package/base-files/files/usr/share/luci/menu.d || true
 cat << 'EOF' > package/base-files/files/usr/share/luci/menu.d/luci-app-cpe-overview.json
 {
@@ -990,7 +1000,7 @@ cat << 'EOF' > package/base-files/files/usr/share/rpcd/acl.d/luci-app-cpe-overvi
 		"read": {
 			"ubus": {
 				"system": [ "info" ],
-				"network.device": [ "status" ]
+				"network.interface": [ "dump" ]
 			},
 			"file": {
 				"/proc/net/arp": [ "read" ]
