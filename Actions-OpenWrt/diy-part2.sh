@@ -33,7 +33,7 @@ define Device/cudy_tr3000-512mb-v1
   IMAGE_SIZE := 502272k
   KERNEL_IN_UBI := 1
   IMAGE/sysupgrade.bin := sysupgrade-tar | append-metadata
-  DEVICE_PACKAGES := kmod-usb3 kmod-mt7981-firmware mt7981-wo-firmware
+  DEVICE_PACKAGES := kmod-usb3 kmod-mt7915e kmod-mt7981-firmware mt7981-wo-firmware automount
 endef
 TARGET_DEVICES += cudy_tr3000-512mb-v1
 EOF
@@ -368,13 +368,14 @@ return view.extend({
 });
 EOF
 
-# 8. 预置中兴 F50 免驱支持、MTU 1420 及防限速 TTL/HL=64 锁定 (动态绑定，绝不写死)
+# 8. 预置中兴 F50 免驱支持、MTU 1420 及防限速 TTL/HL=64 锁定 (动态绑定，原生适配 fw4)
 mkdir -p package/base-files/files/etc/uci-defaults || true
 
 # 8.1 部署底层 nftables TTL 锁定脚本 (物理固化进系统镜像)
 cat << 'EOF' > package/base-files/files/etc/firewall.ttl
 #!/bin/sh
 # 针对 F50 物理网卡出口强制锁定 IPv4 TTL=64 与 IPv6 Hop Limit=64
+nft add table inet fw4 2>/dev/null
 nft add chain inet fw4 f50_ttl '{ type filter hook postrouting priority 300; policy accept; }' 2>/dev/null
 nft flush chain inet fw4 f50_ttl 2>/dev/null
 nft add rule inet fw4 f50_ttl oifname '{ "eth2", "usb0" }' ip ttl set 64 2>/dev/null
@@ -382,14 +383,23 @@ nft add rule inet fw4 f50_ttl oifname '{ "eth2", "usb0" }' ip6 hoplimit set 64 2
 EOF
 chmod +x package/base-files/files/etc/firewall.ttl || true
 
-# 8.2 开机自动绑定网络接口与防火墙触发规则 (按需动态识别设备节点)
+# 8.2 部署 fw4 原生 nftables 挂载目录 (确保 firewall4 重载或重启时 100% 自动加载)
+mkdir -p package/base-files/files/usr/share/nftables.d/table-post || true
+cat << 'EOF' > package/base-files/files/usr/share/nftables.d/table-post/99-f50-ttl.nft
+chain f50_ttl {
+    type filter hook postrouting priority 300; policy accept;
+    oifname { "eth2", "usb0" } ip ttl set 64
+    oifname { "eth2", "usb0" } ip6 hoplimit set 64
+}
+EOF
+
+# 8.3 开机自动绑定网络接口
 cat << 'EOF' > package/base-files/files/etc/uci-defaults/99-f50-hotplug
 uci set network.f50=interface
 uci set network.f50.proto='dhcp'
 uci set network.f50.metric='20'
 uci set network.f50.mtu='1420'
 
-# 动态探测当前已就绪的 5G 网卡设备 (usb0 或 eth2)
 DEV=""
 if [ -d "/sys/class/net/usb0" ]; then
     DEV="usb0"
@@ -397,7 +407,6 @@ elif [ -d "/sys/class/net/eth2" ]; then
     DEV="eth2"
 fi
 
-# 仅在开机已识别到硬件时预设设备名，未插卡时保持未绑定，交由第 9 节热插拔脚本动态接管
 if [ -n "$DEV" ]; then
     uci set network.f50.device="$DEV"
 fi
@@ -406,25 +415,19 @@ uci commit network
 for i in $(seq 0 10); do
     ZNAME=$(uci -q get firewall.@zone[$i].name)
     if [ "$ZNAME" = "wan" ]; then
+        uci del_list firewall.@zone[$i].network='f50' 2>/dev/null
         uci add_list firewall.@zone[$i].network='f50'
         uci commit firewall
         break
     fi
 done
 
-# 注册 TTL 防火墙脚本到 firewall4
-uci -q delete firewall.f50_ttl
-uci set firewall.f50_ttl=include
-uci set firewall.f50_ttl.type='script'
-uci set firewall.f50_ttl.path='/etc/firewall.ttl'
-uci set firewall.f50_ttl.reload='1'
-uci commit firewall
-
+/etc/firewall.ttl 2>/dev/null || true
 exit 0
 EOF
 chmod +x package/base-files/files/etc/uci-defaults/99-f50-hotplug || true
 
-# 9. 部署 USB 动态热插拔规则（引入 2 秒 Link-Up 缓冲，防止 DHCP 超时丢包）
+# 9. 部署 USB 动态热插拔规则（引入 2 秒缓冲并自动强化 TTL 规则）
 mkdir -p package/base-files/files/etc/hotplug.d/net || true
 cat << 'EOF' > package/base-files/files/etc/hotplug.d/net/99-f50-auto
 case "$ACTION" in
@@ -436,6 +439,7 @@ case "$ACTION" in
                 uci commit network
                 /etc/init.d/network reload
             fi
+            /etc/firewall.ttl 2>/dev/null || true
             ( sleep 2 && ifup f50 ) &
         fi
         ;;
