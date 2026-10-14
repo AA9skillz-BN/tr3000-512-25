@@ -933,10 +933,10 @@ return view.extend({
 					E('span', { 'style': 'font-size: 12px; color: #c9933e; font-weight: 500;' }, f50Online ? 'RNDIS / CDC-NCM 正常' : '未连接')
 				]),
 				E('div', { 'style': 'display: grid; grid-template-columns: 1fr 1fr; gap: 8px; font-size: 12px;' }, [
-					E('div', { 'style': 'opacity: 0.7;' }, '设备节点: ' + E('strong', {}, activeDevice)),
-					E('div', { 'style': 'opacity: 0.7;' }, '优化 MTU: ' + E('strong', {}, '1420')),
-					E('div', { 'style': 'opacity: 0.7;' }, '保活巡检: ' + E('strong', {}, '3分钟心跳自愈')),
-					E('div', { 'style': 'opacity: 0.7;' }, '硬件加速: ' + E('strong', {}, 'MTK PPE Offload'))
+					E('div', { 'style': 'opacity: 0.7;' }, [ '设备节点: ', E('strong', {}, activeDevice) ]),
+					E('div', { 'style': 'opacity: 0.7;' }, [ '优化 MTU: ', E('strong', {}, '1420') ]),
+					E('div', { 'style': 'opacity: 0.7;' }, [ '保活巡检: ', E('strong', {}, '3分钟心跳自愈') ]),
+					E('div', { 'style': 'opacity: 0.7;' }, [ '硬件加速: ', E('strong', {}, 'MTK PPE Offload') ])
 				])
 			]),
 			E('div', { 'class': 'myos-card', 'style': 'padding: 18px 20px;' }, [
@@ -958,7 +958,7 @@ return view.extend({
 			]),
 			E('div', { 'style': 'display: flex; justify-content: space-between; font-size: 12px; opacity: 0.75;' }, [
 				E('span', {}, 'RAM 真实负载: ' + usedMem + ' MB / ' + totalMem + ' MB'),
-				E('span', {}, 'RootFS Overlay 可用: ' + E('strong', { 'style': 'color: #27ae60;' }, '~430 MB+ (超充裕空间)'))
+				E('span', {}, [ 'RootFS Overlay 可用: ', E('strong', { 'style': 'color: #27ae60;' }, '~430 MB+ (超充裕空间)') ])
 			])
 		]);
 
