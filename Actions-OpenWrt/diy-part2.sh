@@ -531,12 +531,14 @@ cat << 'EOF' > package/base-files/files/www/luci-static/resources/cpe_myos_overr
     --cpe-gold: #c9933e;
     --cpe-gold-light: #fef5e7;
     --cpe-border: #edeae2;
+    --myos-text-primary: #1e1e1e;
+    --myos-text-secondary: #6e6e73;
     --cpe-radius-lg: 18px;
     --cpe-radius-md: 12px;
 }
 
 @media (prefers-color-scheme: light) {
-    body:not(.login) {
+    body:not(.login):not(.login-page) {
         background-color: var(--cpe-bg-main) !important;
     }
     .main-left, nav#mainmenu, .navigation {
@@ -556,6 +558,10 @@ cat << 'EOF' > package/base-files/files/www/luci-static/resources/cpe_myos_overr
     margin-bottom: 24px !important;
 }
 
+.myos-card {
+    color: var(--myos-text-primary) !important;
+}
+
 .cbi-button-apply, .cbi-button-save, .cbi-button-action.important {
     background-color: var(--cpe-gold) !important;
     border-color: var(--cpe-gold) !important;
@@ -564,45 +570,46 @@ cat << 'EOF' > package/base-files/files/www/luci-static/resources/cpe_myos_overr
 }
 
 /* ==========================================================================
-   2. 专属定制：MYOS 暖白香槟金 5G 动态呼吸登录页 (防污染前缀限制)
+   2. 专属定制：MYOS 暖白香槟金 5G 动态呼吸登录页 (全兼容 Argon 25.x DOM)
    ========================================================================== */
 @keyframes login-wave {
-    0% { transform: scale(0.7); opacity: 0.8; }
+    0% { transform: translateX(-50%) scale(0.7); opacity: 0.8; }
     50% { opacity: 0.4; }
-    100% { transform: scale(1.35); opacity: 0; }
+    100% { transform: translateX(-50%) scale(1.35); opacity: 0; }
 }
 
 @keyframes float-badge {
-    0%, 100% { transform: translateY(0); }
-    50% { transform: translateY(-5px); }
+    0%, 100% { transform: translateX(-50%) translateY(0); }
+    50% { transform: translateX(-50%) translateY(-5px); }
 }
 
-body.login, .login-page {
+body.login, .login-page, body:has(.login-container), body:has(.form-login) {
     background: radial-gradient(circle at 50% 30%, #ffffff 0%, #f6f5f0 75%) !important;
     min-height: 100vh !important;
-    display: flex !important;
-    align-items: center !important;
-    justify-content: center !important;
 }
 
-body.login::before, .login-page::before, .login-bg {
+body.login::before, .login-page::before, .login-bg, .main-bg, video#bg-video {
     display: none !important;
 }
 
+.login-page .login-container,
 body.login .login-container, 
 body.login .login-box, 
+.login-container .form-login,
 body.login form[action*="login"] {
     background: #ffffff !important;
     border-radius: 24px !important;
     border: 1px solid #edeae2 !important;
     box-shadow: 0 12px 40px rgba(27, 42, 74, 0.06), 0 2px 8px rgba(0, 0, 0, 0.02) !important;
-    padding: 40px 36px 36px 36px !important;
+    padding: 46px 36px 36px 36px !important;
     max-width: 400px !important;
     width: 90% !important;
+    margin: 60px auto 20px auto !important;
     position: relative !important;
     overflow: visible !important;
 }
 
+.login-page .login-container::before,
 body.login .login-container::before {
     content: "";
     position: absolute;
@@ -615,9 +622,11 @@ body.login .login-container::before {
     background: rgba(201, 147, 62, 0.12);
     border: 1px solid rgba(201, 147, 62, 0.35);
     z-index: 1;
+    pointer-events: none;
     animation: login-wave 3s infinite cubic-bezier(0, 0.2, 0.8, 1);
 }
 
+.login-page .login-container::after,
 body.login .login-container::after {
     content: "5G";
     position: absolute;
@@ -638,19 +647,23 @@ body.login .login-container::after {
     box-shadow: 0 8px 20px rgba(44, 76, 122, 0.28);
     border: 3px solid #ffffff;
     z-index: 2;
+    pointer-events: none;
     animation: float-badge 3.5s ease-in-out infinite;
 }
 
+.login-container h2,
 body.login h2, 
 body.login form[action*="login"] legend {
     font-size: 20px !important;
     font-weight: 700 !important;
     color: #1e1e1e !important;
     text-align: center !important;
-    margin-top: 35px !important;
+    margin-top: 25px !important;
     margin-bottom: 6px !important;
 }
 
+.login-container input[type="text"],
+.login-container input[type="password"],
 body.login input[type="text"],
 body.login input[type="password"] {
     background: #fbfaf7 !important;
@@ -664,6 +677,8 @@ body.login input[type="password"] {
     transition: all 0.25s ease !important;
 }
 
+.login-container input[type="text"]:focus,
+.login-container input[type="password"]:focus,
 body.login input[type="text"]:focus,
 body.login input[type="password"]:focus {
     border-color: #c9933e !important;
@@ -672,6 +687,8 @@ body.login input[type="password"]:focus {
     outline: none !important;
 }
 
+.login-container input[type="submit"],
+.login-container .cbi-button-action,
 body.login input[type="submit"],
 body.login .cbi-button-action {
     background: linear-gradient(135deg, #c9933e 0%, #b8822f 100%) !important;
@@ -694,11 +711,14 @@ body.login .cbi-button-action {
 @media (prefers-color-scheme: dark) {
     :root {
         --cpe-bg-main: #121316 !important;
-        --cpe-bg-card: rgba(26, 28, 34, 0.85) !important;
+        --cpe-bg-card: rgba(26, 28, 34, 0.92) !important;
         --cpe-bg-sidebar: #181a20 !important;
         --cpe-border: rgba(255, 255, 255, 0.08) !important;
         --myos-text-primary: #F2F2F7 !important;
         --myos-text-secondary: #98989D !important;
+    }
+    .myos-card {
+        color: #F2F2F7 !important;
     }
 }
 
@@ -713,21 +733,6 @@ html, body {
 .myos-card {
     backdrop-filter: blur(20px) !important;
     -webkit-backdrop-filter: blur(20px) !important;
-}
-
-.myos-telemetry-pill {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    gap: 12px;
-    background: rgba(0, 0, 0, 0.04);
-    border: 1px solid var(--cpe-border, #edeae2);
-    padding: 6px 18px;
-    border-radius: 999px;
-    font-size: 12px;
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, monospace;
-    color: var(--myos-text-primary, #1c1c1e);
-    margin-top: 16px;
 }
 
 /* ==========================================================================
