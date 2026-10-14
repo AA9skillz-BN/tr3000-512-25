@@ -227,7 +227,7 @@ cat << 'EOF' > package/base-files/files/usr/share/rpcd/acl.d/luci-app-autoupdate
 }
 EOF
 
-# 7. 部署 LuCI 视图 (现代化动效升级控制台)
+# 7. 部署 LuCI 视图 (现代化动效升级控制台，带防泄漏定时器保护)
 mkdir -p package/base-files/files/www/luci-static/resources/view/autoupdate || true
 cat << 'EOF' > package/base-files/files/www/luci-static/resources/view/autoupdate/index.js
 'use strict';
@@ -318,9 +318,14 @@ return view.extend({
 								fs.exec('/bin/sh', ['-c', '/usr/bin/auto-update-firmware.sh >/dev/null 2>&1 &']);
 
 								var poll = window.setInterval(function() {
+									var logArea = document.getElementById('update_log_area');
+									if (!logArea) {
+										window.clearInterval(poll);
+										return;
+									}
+
 									fs.read_direct('/tmp/firmware_update.log').then(function(res) {
-										var logArea = document.getElementById('update_log_area');
-										if (logArea && res) {
+										if (res) {
 											logArea.value = res;
 											logArea.scrollTop = logArea.scrollHeight;
 
@@ -369,18 +374,17 @@ return view.extend({
 });
 EOF
 
-# 8. 预置中兴 F50 免驱支持、MTU 1420 及防限速 TTL/HL=64 锁定 (动态绑定，原生适配 fw4)
+# 8. 预置中兴 F50 免驱支持、MTU 1420 及防限速 TTL/HL=65 精准锁定 (抵消 F50 内部路由扣减 1 点)
 mkdir -p package/base-files/files/etc/uci-defaults || true
 
-# 8.1 部署底层 nftables TTL 锁定脚本 (物理固化进系统镜像)
+# 8.1 部署底层 nftables TTL 锁定脚本 (物理固化进系统镜像，设为 65 确保经 F50 转发后到达基站刚好为 64)
 cat << 'EOF' > package/base-files/files/etc/firewall.ttl
 #!/bin/sh
-# 针对 F50 物理网卡出口强制锁定 IPv4 TTL=64 与 IPv6 Hop Limit=64
 nft add table inet fw4 2>/dev/null
 nft add chain inet fw4 f50_ttl '{ type filter hook postrouting priority 300; policy accept; }' 2>/dev/null
 nft flush chain inet fw4 f50_ttl 2>/dev/null
-nft add rule inet fw4 f50_ttl oifname '{ "eth2", "usb0" }' ip ttl set 64 2>/dev/null
-nft add rule inet fw4 f50_ttl oifname '{ "eth2", "usb0" }' ip6 hoplimit set 64 2>/dev/null
+nft add rule inet fw4 f50_ttl oifname '{ "eth2", "usb0" }' ip ttl set 65 2>/dev/null
+nft add rule inet fw4 f50_ttl oifname '{ "eth2", "usb0" }' ip6 hoplimit set 65 2>/dev/null
 EOF
 chmod +x package/base-files/files/etc/firewall.ttl || true
 
@@ -389,8 +393,8 @@ mkdir -p package/base-files/files/usr/share/nftables.d/table-post || true
 cat << 'EOF' > package/base-files/files/usr/share/nftables.d/table-post/99-f50-ttl.nft
 chain f50_ttl {
     type filter hook postrouting priority 300; policy accept;
-    oifname { "eth2", "usb0" } ip ttl set 64
-    oifname { "eth2", "usb0" } ip6 hoplimit set 64
+    oifname { "eth2", "usb0" } ip ttl set 65
+    oifname { "eth2", "usb0" } ip6 hoplimit set 65
 }
 EOF
 
@@ -423,7 +427,6 @@ for i in $(seq 0 10); do
     fi
 done
 
-# 默认停止未配置 f50 节点的 mwan3，完全交由内核原生 Metric 跃点数自动故障转移
 /etc/init.d/mwan3 disable 2>/dev/null || true
 /etc/init.d/mwan3 stop 2>/dev/null || true
 
@@ -481,23 +484,31 @@ exit 0
 EOF
 chmod +x package/base-files/files/etc/uci-defaults/99-timesync || true
 
-# 12. 部署 F50 自动保活看门狗脚本 (仅单接口自愈，严禁全局 network reload 干扰全屋网络)
+# 12. 部署 F50 自动保活看门狗脚本 (引入本地网关路由探测法，双线同插防误判)
 cat << 'EOF' > package/base-files/files/usr/bin/f50-watchdog.sh
 #!/bin/sh
 
 TARGET_IP="223.5.5.5"
 LOG_TAG="F50-Watchdog"
 
-# 动态获取 f50 绑定的真实物理网卡设备名 (eth2 或 usb0)
 DEV=$(uci -q get network.f50.device)
 [ -z "$DEV" ] && exit 0
 
-# 若物理网卡未插上或未处于 UP 状态，直接静默退出
 if ! ip link show "$DEV" 2>/dev/null | grep -q "UP"; then
     exit 0
 fi
 
-# 使用真实的物理设备名 DEV 进行 ping 探测
+# 提取该接口当前实际的网关 IP，避免双线同插时因默认路由在有线 WAN 上导致直接盲 ping 失败
+GATEWAY_IP=$(ip route show dev "$DEV" proto kernel | awk '/via/ {print $2}' | head -n 1)
+
+if [ -n "$GATEWAY_IP" ]; then
+    if ! ping -c 2 -W 1 "$GATEWAY_IP" >/dev/null 2>&1; then
+        logger -t "$LOG_TAG" "F50 ($DEV) 本地网关 $GATEWAY_IP 无响应，重置接口..."
+        ifup f50
+        exit 0
+    fi
+fi
+
 if ! ping -c 3 -W 2 -I "$DEV" "$TARGET_IP" >/dev/null 2>&1; then
     logger -t "$LOG_TAG" "检测到 F50 ($DEV) 蜂窝数据失联，正在重新请求 DHCP 租约..."
     ifup f50
