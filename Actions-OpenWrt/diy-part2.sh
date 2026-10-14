@@ -40,7 +40,7 @@ EOF
     fi
 fi
 
-# 4. 在线升级核心脚本 (加入直连失败自动切国内加速镜像、sha256 校验、OOM 防护)
+# 4. 在线升级核心脚本 (支持保留配置与 -n 全新刷入切换、国内加速镜像、sha256 校验、OOM 防护)
 mkdir -p package/base-files/files/usr/bin || true
 cat << 'EOF' > package/base-files/files/usr/bin/auto-update-firmware.sh
 #!/bin/sh
@@ -49,6 +49,14 @@ REPO="AA9skillz-BN/tr3000-512-25"
 LOG_FILE="/tmp/firmware_update.log"
 TMP_BIN="/tmp/firmware_upgrade.bin"
 TMP_SHA="/tmp/sha256sums"
+
+# 接收前端传参：若传入 -n 则不保留配置
+UPGRADE_OPTS=""
+MODE_DESC="保留当前配置 (无缝升级)"
+if [ "$1" = "-n" ]; then
+    UPGRADE_OPTS="-n"
+    MODE_DESC="不保留配置 (恢复出厂全新刷入)"
+fi
 
 # 国内高可用备选镜像代理前缀
 PROXIES="https://ghfast.top/ https://ghproxy.net/"
@@ -61,6 +69,7 @@ log() {
 
 log "=========================================="
 log "目标仓库: https://github.com/$REPO"
+log "升级模式: $MODE_DESC"
 log "正在检测网络并连接 GitHub API..."
 log "=========================================="
 
@@ -176,17 +185,18 @@ if command -v fwtool >/dev/null 2>&1; then
     fi
 fi
 
-log "✔ 安全校验通过！系统即将在 3 秒后执行写入并重启..."
+log "✔ 安全校验通过！即将以【$MODE_DESC】模式在 3 秒后写入并重启..."
 log "提示: 刷入过程中切勿断电，完成后访问 192.168.6.1"
 log "=========================================="
 
 # 杀掉大内存后台服务保障写入稳定性
 /etc/init.d/openclash stop 2>/dev/null || true
+/etc/init.d/openbox stop 2>/dev/null || true
 sync
 echo 3 > /proc/sys/vm/drop_caches
 
-# 后台解耦执行刷机
-( sleep 3 && sysupgrade "$TMP_BIN" ) >/dev/null 2>&1 &
+# 后台解耦执行刷机（根据参数决定是否带 -n）
+( sleep 3 && sysupgrade $UPGRADE_OPTS "$TMP_BIN" ) >/dev/null 2>&1 &
 exit 0
 EOF
 chmod +x package/base-files/files/usr/bin/auto-update-firmware.sh || true
@@ -227,7 +237,7 @@ cat << 'EOF' > package/base-files/files/usr/share/rpcd/acl.d/luci-app-autoupdate
 }
 EOF
 
-# 7. 部署 LuCI 视图 (现代化动效升级控制台，带防泄漏定时器保护)
+# 7. 部署 LuCI 视图 (支持保留/不保留配置勾选切换 + 防误触二次确认)
 mkdir -p package/base-files/files/www/luci-static/resources/view/autoupdate || true
 cat << 'EOF' > package/base-files/files/www/luci-static/resources/view/autoupdate/index.js
 'use strict';
@@ -244,7 +254,7 @@ return view.extend({
 	},
 
 	render: function(data) {
-		var logText = data[0] || '等待操作：点击下方按钮开始检查并同步最新构建...';
+		var logText = data[0] || '等待操作：请选择升级模式并点击下方按钮开始同步最新构建...';
 
 		var styleNode = E('style', {}, [
 			'@keyframes pulse-bar { 0% { background-position: 0% 50%; } 50% { background-position: 100% 50%; } 100% { background-position: 0% 50%; } }',
@@ -257,7 +267,8 @@ return view.extend({
 			'.dot-idle { background: #888; }',
 			'.dot-down { background: #00b4d8; }',
 			'.dot-check { background: #ffb703; }',
-			'.dot-flash { background: #ef233c; }'
+			'.dot-flash { background: #ef233c; }',
+			'.keep-config-box { display: flex; align-items: center; gap: 8px; padding: 10px 14px; border-radius: 10px; background: rgba(201, 147, 62, 0.08); border: 1px solid rgba(201, 147, 62, 0.3); margin-bottom: 15px; width: fit-content; }'
 		]);
 
 		var progressBar = E('div', { 'class': 'ota-progress-container', 'id': 'ota_progress' }, [
@@ -275,10 +286,27 @@ return view.extend({
 			])
 		]);
 
+		var keepConfigCheckbox = E('input', {
+			'type': 'checkbox',
+			'id': 'chk_keep_config',
+			'checked': 'checked',
+			'style': 'width: 16px; height: 16px; cursor: pointer; accent-color: #c9933e;',
+			'change': function(ev) {
+				var hint = document.getElementById('keep_config_hint');
+				if (ev.target.checked) {
+					hint.innerText = '（推荐：保留拨号、无线密码及备份名单内的插件设置）';
+					hint.style.color = '';
+				} else {
+					hint.innerText = '（⚠️ 警告：将清空所有个人数据并恢复出厂设置，适合大版本跨度更新）';
+					hint.style.color = '#ef233c';
+				}
+			}
+		});
+
 		var viewDOM = E('div', { 'class': 'cbi-map' }, [
 			styleNode,
 			E('h2', {}, _('在线固件升级')),
-			E('div', { 'class': 'cbi-map-descr' }, _('一键拉取 AA9skillz-BN/tr3000-512-25 仓库最新 Release 固件，支持国内镜像智能故障转移，保留配置无感升级。')),
+			E('div', { 'class': 'cbi-map-descr' }, _('一键拉取 AA9skillz-BN/tr3000-512-25 仓库最新 Release 固件，支持国内镜像智能故障转移与刷机模式自由切换。')),
 
 			E('div', { 'class': 'cbi-section' }, [
 				E('div', { 'class': 'cbi-section-node' }, [
@@ -297,25 +325,39 @@ return view.extend({
 				E('h3', {}, _('升级控制台')),
 				E('div', { 'class': 'cbi-section-node' }, [
 					statusBadges,
+					E('div', { 'class': 'keep-config-box' }, [
+						keepConfigCheckbox,
+						E('label', { 'for': 'chk_keep_config', 'style': 'font-weight: 600; cursor: pointer; user-select: none;' }, _('保留当前系统配置')),
+						E('span', { 'id': 'keep_config_hint', 'style': 'font-size: 12px; opacity: 0.8;' }, _('（推荐：保留拨号、无线密码及备份名单内的插件设置）'))
+					]),
 					E('div', { 'style': 'margin-bottom: 15px;' }, [
 						E('button', {
 							'id': 'btn_start_update',
 							'class': 'cbi-button cbi-button-action important',
 							'click': function(ev) {
+								var keep = document.getElementById('chk_keep_config').checked;
+								if (!keep) {
+									if (!window.confirm('⚠️ 确定要【不保留配置】升级吗？\n\n这将会抹除路由器上所有的个人配置和后装插件，恢复到新固件的初始出厂状态！')) {
+										return;
+									}
+								}
+
 								ev.target.disabled = true;
+								document.getElementById('chk_keep_config').disabled = true;
 								document.getElementById('ota_progress').style.display = 'block';
 								
 								var dot = document.getElementById('dot_status');
 								var txt = document.getElementById('text_status');
 								dot.className = 'ota-dot dot-down active';
-								txt.innerText = '正在连接云端并拉取固件...';
+								txt.innerText = keep ? '正在拉取固件 (保留配置模式)...' : '正在拉取固件 (全新恢复出厂模式)...';
 
 								ui.showModal(_('正在处理'), [
 									E('p', { 'class': 'spinning' }, _('OTA 升级程序已启动，请关注下方动态进度条与实时输出...'))
 								]);
 								setTimeout(function() { ui.hideModal(); }, 2000);
 
-								fs.exec('/bin/sh', ['-c', '/usr/bin/auto-update-firmware.sh >/dev/null 2>&1 &']);
+								var cmd = keep ? '/usr/bin/auto-update-firmware.sh >/dev/null 2>&1 &' : '/usr/bin/auto-update-firmware.sh -n >/dev/null 2>&1 &';
+								fs.exec('/bin/sh', ['-c', cmd]);
 
 								var poll = window.setInterval(function() {
 									var logArea = document.getElementById('update_log_area');
@@ -346,6 +388,7 @@ return view.extend({
 												txt.innerText = '升级失败，已安全终止';
 												document.getElementById('ota_progress').style.display = 'none';
 												document.getElementById('btn_start_update').disabled = false;
+												document.getElementById('chk_keep_config').disabled = false;
 												window.clearInterval(poll);
 											}
 										}
@@ -398,7 +441,7 @@ chain f50_ttl {
 }
 EOF
 
-# 8.3 开机自动绑定网络接口与禁用冗余 mwan3 干扰
+# 8.3 开机自动绑定网络接口、开启 MTK PPE 硬件加速与 5G 160MHz 频宽
 cat << 'EOF' > package/base-files/files/etc/uci-defaults/99-f50-hotplug
 uci set network.f50=interface
 uci set network.f50.proto='dhcp'
@@ -417,15 +460,34 @@ if [ -n "$DEV" ]; then
 fi
 uci commit network
 
+# 真正开启 firewall4 的软件与 MTK 硬件 PPE 流量分载 (Offloading)
+uci set firewall.@defaults[0].flow_offloading='1'
+uci set firewall.@defaults[0].flow_offloading_hw='1'
+
 for i in $(seq 0 10); do
     ZNAME=$(uci -q get firewall.@zone[$i].name)
     if [ "$ZNAME" = "wan" ]; then
         uci del_list firewall.@zone[$i].network='f50' 2>/dev/null
         uci add_list firewall.@zone[$i].network='f50'
-        uci commit firewall
         break
     fi
 done
+uci commit firewall
+
+# 真正将 5GHz Wi-Fi 默认配置为 160MHz (HE160) 满血频宽并启用无线
+for r in radio0 radio1; do
+    BAND=$(uci -q get wireless.$r.band)
+    if [ "$BAND" = "5g" ]; then
+        uci set wireless.$r.htmode='HE160'
+        uci set wireless.$r.country='CN'
+        uci set wireless.$r.disabled='0'
+    elif [ "$BAND" = "2g" ]; then
+        uci set wireless.$r.htmode='HE40'
+        uci set wireless.$r.country='CN'
+        uci set wireless.$r.disabled='0'
+    fi
+done
+uci commit wireless
 
 /etc/init.d/mwan3 disable 2>/dev/null || true
 /etc/init.d/mwan3 stop 2>/dev/null || true
@@ -785,7 +847,7 @@ for CSS_FILE in $(find package/ feeds/ -type f -name "cascade.css" 2>/dev/null |
     fi
 done
 
-# 3. 部署健壮版 CPE 聚合看板 (改用 interface dump 免参原生接口，消除 DOM 拼接乱码)
+# 3. 部署 100% 真数据版 CPE 聚合看板 (实时探针读取 Overlay 闪存、UCI 无线/硬件加速、真实 MTU 与外网连通性)
 mkdir -p package/base-files/files/www/luci-static/resources/view/status || true
 cat << 'EOF' > package/base-files/files/www/luci-static/resources/view/status/cpe_dashboard.js
 'use strict';
@@ -793,6 +855,7 @@ cat << 'EOF' > package/base-files/files/www/luci-static/resources/view/status/cp
 'require fs';
 'require ui';
 'require rpc';
+'require uci';
 
 var callSystemInfo = rpc.declare({
 	object: 'system',
@@ -809,7 +872,10 @@ return view.extend({
 		return Promise.all([
 			callSystemInfo().catch(function() { return {}; }),
 			fs.lines('/proc/net/arp').catch(function() { return []; }),
-			callNetworkInterfaces().catch(function() { return { interface: [] }; })
+			callNetworkInterfaces().catch(function() { return { interface: [] }; }),
+			fs.exec('/bin/df', ['-m', '/overlay']).catch(function() { return { stdout: '' }; }),
+			uci.load('firewall').catch(function() {}),
+			uci.load('wireless').catch(function() {})
 		]);
 	},
 
@@ -817,7 +883,9 @@ return view.extend({
 		var info = (data && typeof data[0] === 'object' && data[0] !== null) ? data[0] : {};
 		var arpLines = (data && Array.isArray(data[1])) ? data[1] : [];
 		var ifaceData = (data && typeof data[2] === 'object' && data[2] !== null && Array.isArray(data[2].interface)) ? data[2].interface : [];
+		var dfOut = (data && data[3] && typeof data[3].stdout === 'string') ? data[3].stdout : '';
 
+		// 1. 真实局域网在线客户端统计
 		var clientCount = 0;
 		if (Array.isArray(arpLines)) {
 			clientCount = arpLines.filter(function(line) {
@@ -827,20 +895,52 @@ return view.extend({
 			}).length;
 		}
 
-		// 通过原生 ubus network.interface dump 精准判定 f50 状态与物理绑定
+		// 2. 真实 F50 状态、设备名与 IP 获取判定
 		var f50Online = false;
+		var f50HasIP = false;
 		var activeDevice = '未就绪';
 		for (var i = 0; i < ifaceData.length; i++) {
 			if (ifaceData[i].interface === 'f50') {
 				if (ifaceData[i].up) {
 					f50Online = true;
 					activeDevice = ifaceData[i].l3_device || ifaceData[i].device || 'eth2';
+					if (Array.isArray(ifaceData[i]['ipv4-address']) && ifaceData[i]['ipv4-address'].length > 0) {
+						f50HasIP = true;
+					}
 				}
 				break;
 			}
 		}
 
-		// 内存精准计算：剔除 Buffers 与 Cached 干扰，还原真实物理负载
+		// 3. 真实读取 UCI 中的 MTU、防火墙 PPE 硬件加速状态、以及无线频宽状态
+		var realMtu = uci.get('network', 'f50', 'mtu') || '1420';
+		var hwOffload = uci.get('firewall', '@defaults[0]', 'flow_offloading_hw') === '1';
+		var swOffload = uci.get('firewall', '@defaults[0]', 'flow_offloading') === '1';
+		var offloadText = hwOffload ? 'MTK PPE 硬件加速已开启' : (swOffload ? '软件流量分载已开启' : '未开启 (可在防火墙启用)');
+
+		var wifiUp = true;
+		var htMode5g = 'HE160';
+		var radios = uci.sections('wireless', 'wifi-device');
+		for (var r = 0; r < radios.length; r++) {
+			if (radios[r].band === '5g') {
+				htMode5g = radios[r].htmode || 'HE80';
+				if (radios[r].disabled === '1') wifiUp = false;
+			}
+		}
+
+		// 4. 真实解析 /overlay 剩余闪存空间 (MB)
+		var overlayText = '读取中...';
+		if (dfOut) {
+			var dfLines = dfOut.trim().split('\n');
+			if (dfLines.length >= 2) {
+				var cols = dfLines[dfLines.length - 1].trim().split(/\s+/);
+				if (cols.length >= 4) {
+					overlayText = cols[3] + ' MB 可用 / 共 ' + cols[1] + ' MB';
+				}
+			}
+		}
+
+		// 5. 内存精准计算
 		var mem = info.memory || {};
 		var totalMem = Math.round((typeof mem.total === 'number' ? mem.total : 536870912) / 1048576);
 		var availMem = Math.round((typeof mem.available === 'number' ? mem.available : ((mem.free || 0) + (mem.buffered || 0) + (mem.cached || 0))) / 1048576);
@@ -913,7 +1013,7 @@ return view.extend({
 		var modelWrapper = E('div', { 'class': 'myos-card model-canvas' }, [
 			E('div', { 'style': 'position: absolute; top: 22px; left: 24px; text-align: left;' }, [
 				E('div', { 'style': 'font-size: 20px; font-weight: 700; margin-bottom: 4px;' }, 
-					f50Online ? '蜂窝 5G 聚合网络在线' : '蜂窝网络重连中 / 未就绪'),
+					(f50Online && f50HasIP) ? '蜂窝 5G 聚合网络已连接' : '蜂窝网络重连中 / 未就绪'),
 				E('div', { 'style': 'font-size: 13px; opacity: 0.75;' }, 'Cudy TR3000 (哑光蓝双天线) + 中兴 F50 5G 便携联动')
 			]),
 			E('div', { 'class': 'wave-base' }),
@@ -926,7 +1026,7 @@ return view.extend({
 			E('div', { 'style': 'margin-top: 12px; z-index: 3;' }, [
 				E('span', { 'class': 'status-pill ' + (f50Online ? 'pill-online' : 'pill-offline') }, [
 					E('span', { 'style': 'margin-right: 6px; font-size: 14px;' }, f50Online ? '●' : '○'),
-					f50Online ? '5G 全双工透传 • MTU 1420 优化' : 'F50 等待握手或看门狗介入'
+					f50Online ? ('5G 全双工透传 • MTU ' + realMtu + ' 优化') : 'F50 等待握手或看门狗介入'
 				])
 			])
 		]);
@@ -935,9 +1035,9 @@ return view.extend({
 			E('div', { 'class': 'myos-card', 'style': 'padding: 16px 20px; display: flex; justify-content: space-between; align-items: center;' }, [
 				E('div', {}, [
 					E('div', { 'style': 'font-size: 15px; font-weight: 600;' }, 'Wi-Fi 6 双频无线'),
-					E('div', { 'style': 'font-size: 12px; opacity: 0.7; margin-top: 2px;' }, 'AX3000 • 160MHz 频宽全开')
+					E('div', { 'style': 'font-size: 12px; opacity: 0.7; margin-top: 2px;' }, 'AX3000 • 5G 频宽模式: ' + htMode5g)
 				]),
-				E('span', { 'class': 'status-pill pill-online' }, '运行中')
+				E('span', { 'class': 'status-pill ' + (wifiUp ? 'pill-online' : 'pill-offline') }, wifiUp ? '运行中' : '已关闭')
 			]),
 			E('div', { 'class': 'myos-card', 'style': 'padding: 16px 20px; display: flex; justify-content: space-between; align-items: center;' }, [
 				E('div', {}, [
@@ -953,9 +1053,9 @@ return view.extend({
 				]),
 				E('div', { 'style': 'display: grid; grid-template-columns: 1fr 1fr; gap: 8px; font-size: 12px;' }, [
 					E('div', { 'style': 'opacity: 0.7;' }, [ '设备节点: ', E('strong', {}, activeDevice) ]),
-					E('div', { 'style': 'opacity: 0.7;' }, [ '优化 MTU: ', E('strong', {}, '1420') ]),
+					E('div', { 'style': 'opacity: 0.7;' }, [ '当前 MTU: ', E('strong', {}, realMtu) ]),
 					E('div', { 'style': 'opacity: 0.7;' }, [ '保活巡检: ', E('strong', {}, '3分钟心跳自愈') ]),
-					E('div', { 'style': 'opacity: 0.7;' }, [ '硬件加速: ', E('strong', {}, 'MTK PPE Offload') ])
+					E('div', { 'style': 'opacity: 0.7;' }, [ '加速状态: ', E('strong', {}, offloadText) ])
 				])
 			]),
 			E('div', { 'class': 'myos-card', 'style': 'padding: 18px 20px;' }, [
@@ -970,14 +1070,14 @@ return view.extend({
 					E('strong', { 'style': 'font-size: 15px;' }, '内存与 512MB 闪存空间'),
 					E('span', { 'style': 'font-size: 12px; opacity: 0.7; margin-left: 10px;' }, '512MB DDR3 • 512MB SPI-NAND (mod-490)')
 				]),
-				E('div', { 'style': 'font-size: 14px; font-weight: 600; color: #c9933e;' }, memPercent + '% 已载入')
+				E('div', { 'style': 'font-size: 14px; font-weight: 600; color: #c9933e;' }, memPercent + '% 内存占用')
 			]),
 			E('div', { 'width': '100%', 'height': '10px', 'style': 'width: 100%; height: 10px; background: rgba(0,0,0,0.06); border-radius: 6px; overflow: hidden; display: flex; margin-bottom: 8px;' }, [
 				E('div', { 'style': 'width: ' + memPercent + '%; background: linear-gradient(90deg, #c9933e, #f1c40f); height: 100%; border-radius: 6px;' })
 			]),
 			E('div', { 'style': 'display: flex; justify-content: space-between; font-size: 12px; opacity: 0.75;' }, [
 				E('span', {}, 'RAM 真实负载: ' + usedMem + ' MB / ' + totalMem + ' MB'),
-				E('span', {}, [ 'RootFS Overlay 可用: ', E('strong', { 'style': 'color: #27ae60;' }, '~430 MB+ (超充裕空间)') ])
+				E('span', {}, [ 'RootFS Overlay 真实空间: ', E('strong', { 'style': 'color: #27ae60;' }, overlayText) ])
 			])
 		]);
 
@@ -997,7 +1097,7 @@ return view.extend({
 });
 EOF
 
-# 4. 注册菜单与精准 RPCD ACL 权限 (标准化挂载至 admin/status 并开放 interface dump 权限)
+# 4. 注册菜单与精准 RPCD ACL 权限 (开放 uci 读取与 df 磁盘真实空间查询权限)
 mkdir -p package/base-files/files/usr/share/luci/menu.d || true
 cat << 'EOF' > package/base-files/files/usr/share/luci/menu.d/luci-app-cpe-overview.json
 {
@@ -1025,8 +1125,10 @@ cat << 'EOF' > package/base-files/files/usr/share/rpcd/acl.d/luci-app-cpe-overvi
 				"system": [ "info" ],
 				"network.interface": [ "dump" ]
 			},
+			"uci": [ "network", "firewall", "wireless" ],
 			"file": {
-				"/proc/net/arp": [ "read" ]
+				"/proc/net/arp": [ "read" ],
+				"/bin/df": [ "exec" ]
 			}
 		}
 	}
