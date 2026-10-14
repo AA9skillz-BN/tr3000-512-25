@@ -11,7 +11,7 @@ if [ -f "$DTS_SRC" ]; then
     cp -f "$DTS_SRC" target/linux/mediatek/dts/mt7981b-cudy-tr3000-512mb-v1.dts
 fi
 
-# 3. 注入 512MB 机型定义 (IMAGE_SIZE 采用 502272k 避开 Python 整数解析异常)
+# 3. 注入 512MB 机型定义 (IMAGE_SIZE 采用 502272k 避开 Python 整数解析异常，补齐 5G 无线驱动)
 FILOGIC_MK="target/linux/mediatek/image/filogic.mk"
 if [ -f "$FILOGIC_MK" ]; then
     HAS_DEV=$(grep -c "cudy_tr3000-512mb-v1" "$FILOGIC_MK" || true)
@@ -219,7 +219,8 @@ cat << 'EOF' > package/base-files/files/usr/share/rpcd/acl.d/luci-app-autoupdate
 		},
 		"write": {
 			"file": {
-				"/usr/bin/auto-update-firmware.sh": [ "exec" ]
+				"/usr/bin/auto-update-firmware.sh": [ "exec" ],
+				"/bin/sh": [ "exec" ]
 			}
 		}
 	}
@@ -250,7 +251,7 @@ return view.extend({
 			'@keyframes blink-dot { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: 0.4; transform: scale(0.85); } }',
 			'.ota-progress-container { width: 100%; background: #222; border-radius: 8px; height: 12px; overflow: hidden; margin: 15px 0; display: none; border: 1px solid #444; }',
 			'.ota-progress-bar { width: 100%; height: 100%; background: linear-gradient(90deg, #00c6ff, #0072ff, #00ff87, #60efff); background-size: 300% 300%; animation: pulse-bar 2s ease infinite; }',
-			'.ota-badge { display: inline-flex; align-items: center; padding: 4px 10px; border-radius: 20px; font-size: 12px; margin-right: 10px; background: #2a2a2a; border: 1px solid #444; }',
+			'.ota-badge { display: inline-flex; align-items: center; padding: 4px 10px; border-radius: 20px; font-size: 12px; margin-right: 10px; background: #2a2a2a; color: #eaeaea; border: 1px solid #444; }',
 			'.ota-dot { width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }',
 			'.ota-dot.active { animation: blink-dot 1s infinite; }',
 			'.dot-idle { background: #888; }',
@@ -314,7 +315,7 @@ return view.extend({
 								]);
 								setTimeout(function() { ui.hideModal(); }, 2000);
 
-								fs.exec('/usr/bin/auto-update-firmware.sh');
+								fs.exec('/bin/sh', ['-c', '/usr/bin/auto-update-firmware.sh >/dev/null 2>&1 &']);
 
 								var poll = window.setInterval(function() {
 									fs.read_direct('/tmp/firmware_update.log').then(function(res) {
@@ -393,7 +394,7 @@ chain f50_ttl {
 }
 EOF
 
-# 8.3 开机自动绑定网络接口
+# 8.3 开机自动绑定网络接口与禁用冗余 mwan3 干扰
 cat << 'EOF' > package/base-files/files/etc/uci-defaults/99-f50-hotplug
 uci set network.f50=interface
 uci set network.f50.proto='dhcp'
@@ -422,37 +423,47 @@ for i in $(seq 0 10); do
     fi
 done
 
+# 默认停止未配置 f50 节点的 mwan3，完全交由内核原生 Metric 跃点数自动故障转移
+/etc/init.d/mwan3 disable 2>/dev/null || true
+/etc/init.d/mwan3 stop 2>/dev/null || true
+
 /etc/firewall.ttl 2>/dev/null || true
 exit 0
 EOF
 chmod +x package/base-files/files/etc/uci-defaults/99-f50-hotplug || true
 
-# 9. 部署 USB 动态热插拔规则（引入 2 秒缓冲并自动强化 TTL 规则）
+# 9. 部署 USB 动态热插拔规则（自带防御性接口初始化，消除与 uci-defaults 的顺序冲突）
 mkdir -p package/base-files/files/etc/hotplug.d/net || true
 cat << 'EOF' > package/base-files/files/etc/hotplug.d/net/99-f50-auto
 case "$ACTION" in
     add)
         if [ "$INTERFACE" = "usb0" ] || [ "$INTERFACE" = "eth2" ]; then
+            # 防御性检查：若开机时 hotplug 比 uci-defaults 更早触发，自动补齐基础协议配置
+            if [ "$(uci -q get network.f50)" != "interface" ]; then
+                uci set network.f50=interface
+                uci set network.f50.proto='dhcp'
+                uci set network.f50.metric='20'
+                uci set network.f50.mtu='1420'
+            fi
+
             CURRENT_DEV=$(uci -q get network.f50.device)
             if [ "$CURRENT_DEV" != "$INTERFACE" ]; then
                 uci set network.f50.device="$INTERFACE"
                 uci commit network
-                /etc/init.d/network reload
             fi
+
             /etc/firewall.ttl 2>/dev/null || true
-            ( sleep 2 && ifup f50 ) &
+            ( sleep 2 && ifup f50 ) >/dev/null 2>&1 &
         fi
         ;;
 esac
 EOF
 chmod +x package/base-files/files/etc/hotplug.d/net/99-f50-auto || true
 
-# 10. 声明配置备份白名单（升级时不丢失 OTA 脚本、看门狗与核心配置）
+# 10. 声明配置备份白名单（仅备份用户数据，绝不备份已固化在固件内的脚本以免覆盖新版本）
 mkdir -p package/base-files/files/etc || true
 cat << 'EOF' >> package/base-files/files/etc/sysupgrade.conf
 /etc/openclash/
-/usr/bin/auto-update-firmware.sh
-/usr/bin/f50-watchdog.sh
 EOF
 
 # 11. 系统时区与高可用国内 NTP 校准
@@ -470,7 +481,7 @@ exit 0
 EOF
 chmod +x package/base-files/files/etc/uci-defaults/99-timesync || true
 
-# 12. 部署 F50 自动保活看门狗脚本 (动态绑定实际物理网卡，防止误判断网重启全屋网络)
+# 12. 部署 F50 自动保活看门狗脚本 (仅单接口自愈，严禁全局 network reload 干扰全屋网络)
 cat << 'EOF' > package/base-files/files/usr/bin/f50-watchdog.sh
 #!/bin/sh
 
@@ -479,26 +490,17 @@ LOG_TAG="F50-Watchdog"
 
 # 动态获取 f50 绑定的真实物理网卡设备名 (eth2 或 usb0)
 DEV=$(uci -q get network.f50.device)
-[ -z "$DEV" ] && DEV="eth2"
+[ -z "$DEV" ] && exit 0
 
-# 若物理网卡未插上或未就绪，直接静默退出
-if ! ip link show "$DEV" >/dev/null 2>&1; then
+# 若物理网卡未插上或未处于 UP 状态，直接静默退出
+if ! ip link show "$DEV" 2>/dev/null | grep -q "UP"; then
     exit 0
 fi
 
-# 必须使用真实的物理设备名 DEV 进行 ping 探测 (ping 无法识别逻辑接口名 f50)
-if ! ping -c 3 -W 2 -I "$DEV" $TARGET_IP >/dev/null 2>&1; then
-    logger -t "$LOG_TAG" "检测到 F50 ($DEV) 网络失联，正在尝试重新协商 DHCP 与拉起接口..."
-    ifdown f50
-    sleep 2
+# 使用真实的物理设备名 DEV 进行 ping 探测
+if ! ping -c 3 -W 2 -I "$DEV" "$TARGET_IP" >/dev/null 2>&1; then
+    logger -t "$LOG_TAG" "检测到 F50 ($DEV) 蜂窝数据失联，正在重新请求 DHCP 租约..."
     ifup f50
-    
-    # 二次检测，若仍不通则尝试平滑重载网络配置
-    sleep 8
-    if ! ping -c 2 -W 2 -I "$DEV" $TARGET_IP >/dev/null 2>&1; then
-        logger -t "$LOG_TAG" "网络仍未恢复，执行网络平滑重载..."
-        /etc/init.d/network reload
-    fi
 fi
 exit 0
 EOF
@@ -771,7 +773,7 @@ for CSS_FILE in $(find package/ feeds/ -type f -name "cascade.css" 2>/dev/null |
     fi
 done
 
-# 3. 部署健壮版 CPE 聚合看板 (改用 interface dump 免参原生接口，精准识别在线状态与真实内存)
+# 3. 部署健壮版 CPE 聚合看板 (改用 interface dump 免参原生接口，消除 DOM 拼接乱码)
 mkdir -p package/base-files/files/www/luci-static/resources/view/status || true
 cat << 'EOF' > package/base-files/files/www/luci-static/resources/view/status/cpe_dashboard.js
 'use strict';
@@ -838,7 +840,7 @@ return view.extend({
 			'@keyframes f50-pulse { 0%, 100% { filter: drop-shadow(0 0 4px #00e676); } 50% { filter: drop-shadow(0 0 10px #00e676); } }',
 			'@keyframes led-blink { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }',
 			'.myos-dashboard { display: grid; grid-template-columns: 1.35fr 1fr; gap: 20px; margin-bottom: 24px; }',
-			'.myos-card { background: var(--cpe-bg-card, #ffffff); border-radius: 20px; border: 1px solid var(--cpe-border, #edeae2); box-shadow: 0 4px 20px rgba(0,0,0,0.025); padding: 24px; position: relative; }',
+			'.myos-card { background: var(--cpe-bg-card, #ffffff); color: var(--myos-text-primary, #1e1e1e); border-radius: 20px; border: 1px solid var(--cpe-border, #edeae2); box-shadow: 0 4px 20px rgba(0,0,0,0.025); padding: 24px; position: relative; }',
 			'.model-canvas { display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 400px; position: relative; overflow: hidden; }',
 			'.wave-base { position: absolute; width: 280px; height: 90px; border-radius: 50%; border: 2px solid ' + (f50Online ? 'rgba(41, 128, 185, 0.45)' : 'rgba(160, 160, 160, 0.3)') + '; bottom: 65px; z-index: 1; animation: ripple-wave 2.8s infinite cubic-bezier(0, 0.2, 0.8, 1); }',
 			'.wave-base-2 { animation-delay: 1.4s; }',
@@ -868,7 +870,7 @@ return view.extend({
 					'<stop offset="100%" stop-color="#E5E9F0" />' +
 				'</linearGradient>' +
 			'</defs>' +
-			'<ellipse cx="150" cy="226" rx="100" ry="14" fill="#D6DEE8" />' +
+			'<ellipse cx="150" cy="226" rx="100" ry="14" fill="#D6DEE8" opacity="0.4" />' +
 			'<g transform="rotate(-18 68 180)">' +
 				'<rect x="62" y="55" width="12" height="130" rx="6" fill="url(#trAntenna)" stroke="#1a2e4c" stroke-width="1.2" />' +
 				'<circle cx="68" cy="180" r="8" fill="#1b2f4d" stroke="#34588c" stroke-width="1.5" />' +
@@ -1039,7 +1041,7 @@ EOF
 chmod +x package/base-files/files/etc/uci-defaults/99-cpe-theme-init || true
 
 # ==============================================================================
-# 15. 预置底层网络与内核模块依赖 (支持 OpenBox / 透明代理 / 虚拟网卡)
+# 15. 预置底层网络与内核模块依赖 (支持 OpenBox / 透明代理 / 虚拟网卡 / F50 模式切换)
 # ==============================================================================
 cat << 'EOF' >> .config
 CONFIG_PACKAGE_kmod-tun=y
