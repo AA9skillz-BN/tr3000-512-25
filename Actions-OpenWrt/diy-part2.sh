@@ -435,13 +435,12 @@ exit 0
 EOF
 chmod +x package/base-files/files/etc/uci-defaults/99-f50-hotplug || true
 
-# 9. 部署 USB 动态热插拔规则（自带防御性接口初始化，消除与 uci-defaults 的顺序冲突）
+# 9. 部署 USB 动态热插拔规则（自带防御性初始化，首次变更设备时重载配置使 netifd 生效）
 mkdir -p package/base-files/files/etc/hotplug.d/net || true
 cat << 'EOF' > package/base-files/files/etc/hotplug.d/net/99-f50-auto
 case "$ACTION" in
     add)
         if [ "$INTERFACE" = "usb0" ] || [ "$INTERFACE" = "eth2" ]; then
-            # 防御性检查：若开机时 hotplug 比 uci-defaults 更早触发，自动补齐基础协议配置
             if [ "$(uci -q get network.f50)" != "interface" ]; then
                 uci set network.f50=interface
                 uci set network.f50.proto='dhcp'
@@ -453,6 +452,7 @@ case "$ACTION" in
             if [ "$CURRENT_DEV" != "$INTERFACE" ]; then
                 uci set network.f50.device="$INTERFACE"
                 uci commit network
+                /etc/init.d/network reload
             fi
 
             /etc/firewall.ttl 2>/dev/null || true
@@ -484,7 +484,7 @@ exit 0
 EOF
 chmod +x package/base-files/files/etc/uci-defaults/99-timesync || true
 
-# 12. 部署 F50 自动保活看门狗脚本 (引入本地网关路由探测法，双线同插防误判)
+# 12. 部署 F50 自动保活看门狗脚本 (精准提取第 3 列默认网关 IP，兼顾单线与双线同插场景)
 cat << 'EOF' > package/base-files/files/usr/bin/f50-watchdog.sh
 #!/bin/sh
 
@@ -498,12 +498,13 @@ if ! ip link show "$DEV" 2>/dev/null | grep -q "UP"; then
     exit 0
 fi
 
-# 提取该接口当前实际的网关 IP，避免双线同插时因默认路由在有线 WAN 上导致直接盲 ping 失败
-GATEWAY_IP=$(ip route show dev "$DEV" proto kernel | awk '/via/ {print $2}' | head -n 1)
+# 从默认路由中精准提取 via 后的网关 IP（第 3 列）
+GATEWAY_IP=$(ip route show default dev "$DEV" 2>/dev/null | awk '/via/ {print $3}' | head -n 1)
 
+# 若尚未拿到网关（如未插 SIM 卡或正在握手），不盲目折腾接口；拿到网关后先探活本地网关，再探活公网
 if [ -n "$GATEWAY_IP" ]; then
     if ! ping -c 2 -W 1 "$GATEWAY_IP" >/dev/null 2>&1; then
-        logger -t "$LOG_TAG" "F50 ($DEV) 本地网关 $GATEWAY_IP 无响应，重置接口..."
+        logger -t "$LOG_TAG" "F50 ($DEV) 本地网关 $GATEWAY_IP 无响应，重新请求连接..."
         ifup f50
         exit 0
     fi
