@@ -1135,15 +1135,26 @@ cat << 'EOF' > package/base-files/files/usr/share/rpcd/acl.d/luci-app-cpe-overvi
 }
 EOF
 
-# 5. 开机预置：双保险首行置顶注入 + 刷新 RPCD 权限与缓存
+# 5. 开机预置：锁定 Argon 默认主题与香槟金主色 + 首行置顶注入 CSS + 刷新 RPCD 缓存
 mkdir -p package/base-files/files/etc/uci-defaults || true
 cat << 'EOF' > package/base-files/files/etc/uci-defaults/99-cpe-theme-init
+# 强制锁定默认主题为 Argon
+uci set luci.main.mediaurlbase='/luci-static/argon'
+uci commit luci
+
+# 同步配置 Argon 插件默认主色调为 MYOS 香槟金 (#c9933e)，开启跟随系统深浅色
+if uci -q get argon.@global[0] >/dev/null; then
+    uci set argon.@global[0].primary='#c9933e'
+    uci set argon.@global[0].dark_primary='#c9933e'
+    uci set argon.@global[0].mode='normal'
+    uci commit argon
+fi
+
 ARGON_CSS="/www/luci-static/argon/css/cascade.css"
 IMPORT_RULE='@import url("/luci-static/resources/cpe_myos_override.css");'
 
 if [ -f "$ARGON_CSS" ]; then
     if ! grep -Fq "cpe_myos_override.css" "$ARGON_CSS"; then
-        # 兼容 OpenWrt BusyBox 环境，纯 Shell 首行注入
         echo "$IMPORT_RULE" | cat - "$ARGON_CSS" > /tmp/cascade.tmp && mv /tmp/cascade.tmp "$ARGON_CSS"
     fi
 fi
