@@ -862,7 +862,7 @@ for CSS_FILE in $(find package/ feeds/ -type f -name "cascade.css" 2>/dev/null |
     fi
 done
 
-# 3. 部署全真动态 + 5秒无感实时刷新版 CPE 聚合看板
+# 3. 部署全真动态 + 5秒无感实时刷新版 CPE 聚合看板 (修复 BusyBox df -k 与 uci 匿名节读取)
 mkdir -p package/base-files/files/www/luci-static/resources/view/status || true
 cat << 'EOF' > package/base-files/files/www/luci-static/resources/view/status/cpe_dashboard.js
 'use strict';
@@ -884,15 +884,29 @@ var callNetworkInterfaces = rpc.declare({
 });
 
 function fetchDashboardData() {
+	uci.unload('network');
+	uci.unload('firewall');
+	uci.unload('wireless');
 	return Promise.all([
 		callSystemInfo().catch(function() { return {}; }),
 		fs.lines('/proc/net/arp').catch(function() { return []; }),
 		callNetworkInterfaces().catch(function() { return { interface: [] }; }),
-		fs.exec('/bin/df', ['-m', '/overlay']).catch(function() { return { stdout: '' }; }),
+		fs.exec('/bin/df', ['-k', '/overlay']).catch(function() { return { stdout: '' }; }),
 		uci.load('network').catch(function() {}),
 		uci.load('firewall').catch(function() {}),
 		uci.load('wireless').catch(function() {})
 	]);
+}
+
+function formatUptime(sec) {
+	if (typeof sec !== 'number' || sec <= 0) return '刚启动';
+	var d = Math.floor(sec / 86400);
+	var h = Math.floor((sec % 86400) / 3600);
+	var m = Math.floor((sec % 3600) / 60);
+	var s = sec % 60;
+	if (d > 0) return d + '天 ' + h + '小时 ' + m + '分';
+	if (h > 0) return h + '小时 ' + m + '分 ' + s + '秒';
+	return m + '分 ' + s + '秒';
 }
 
 function parseDashboardData(data) {
@@ -901,6 +915,7 @@ function parseDashboardData(data) {
 	var ifaceData = (data && typeof data[2] === 'object' && data[2] !== null && Array.isArray(data[2].interface)) ? data[2].interface : [];
 	var dfOut = (data && data[3] && typeof data[3].stdout === 'string') ? data[3].stdout : '';
 
+	// 1. 局域网在线客户端实时统计
 	var clientCount = 0;
 	if (Array.isArray(arpLines)) {
 		clientCount = arpLines.filter(function(line) {
@@ -910,6 +925,7 @@ function parseDashboardData(data) {
 		}).length;
 	}
 
+	// 2. F50 接口状态、物理网卡与 IP 实时判定
 	var f50Online = false;
 	var f50HasIP = false;
 	var activeDevice = '未就绪';
@@ -926,9 +942,11 @@ function parseDashboardData(data) {
 		}
 	}
 
+	// 3. 使用标准 uci.sections 读取防火墙 PPE 硬件加速状态与无线频宽
 	var realMtu = uci.get('network', 'f50', 'mtu') || '1420';
-	var hwOffload = uci.get('firewall', '@defaults[0]', 'flow_offloading_hw') === '1';
-	var swOffload = uci.get('firewall', '@defaults[0]', 'flow_offloading') === '1';
+	var fwDefs = uci.sections('firewall', 'defaults');
+	var hwOffload = (fwDefs.length > 0 && fwDefs[0].flow_offloading_hw === '1');
+	var swOffload = (fwDefs.length > 0 && fwDefs[0].flow_offloading === '1');
 	var offloadText = hwOffload ? 'MTK PPE 硬件加速已开启' : (swOffload ? '软件流量分载已开启' : '未开启');
 
 	var wifiUp = true;
@@ -941,22 +959,32 @@ function parseDashboardData(data) {
 		}
 	}
 
+	// 4. 兼容 BusyBox df -k (1K-blocks) 实时换算 /overlay 剩余闪存空间
 	var overlayText = '读取中...';
 	if (dfOut) {
 		var dfLines = dfOut.trim().split('\n');
 		if (dfLines.length >= 2) {
 			var cols = dfLines[dfLines.length - 1].trim().split(/\s+/);
 			if (cols.length >= 4) {
-				overlayText = cols[3] + ' MB 可用 / 共 ' + cols[1] + ' MB';
+				var totalMB = Math.round(parseInt(cols[1], 10) / 1024);
+				var availMB = Math.round(parseInt(cols[3], 10) / 1024);
+				if (!isNaN(availMB) && !isNaN(totalMB)) {
+					overlayText = availMB + ' MB 可用 / 共 ' + totalMB + ' MB';
+				}
 			}
 		}
 	}
 
+	// 5. 内存、CPU 负载与运行时长实时计算
 	var mem = info.memory || {};
 	var totalMem = Math.round((typeof mem.total === 'number' ? mem.total : 536870912) / 1048576);
 	var availMem = Math.round((typeof mem.available === 'number' ? mem.available : ((mem.free || 0) + (mem.buffered || 0) + (mem.cached || 0))) / 1048576);
 	var usedMem = Math.max(0, totalMem - availMem);
 	var memPercent = totalMem > 0 ? Math.round((usedMem / totalMem) * 100) : 0;
+
+	var loadArr = Array.isArray(info.load) ? info.load : [0, 0, 0];
+	var load1m = (loadArr[0] / 65536).toFixed(2);
+	var uptimeStr = formatUptime(info.uptime);
 
 	return {
 		clientCount: clientCount,
@@ -970,7 +998,9 @@ function parseDashboardData(data) {
 		overlayText: overlayText,
 		usedMem: usedMem,
 		totalMem: totalMem,
-		memPercent: memPercent
+		memPercent: memPercent,
+		load1m: load1m,
+		uptimeStr: uptimeStr
 	};
 }
 
@@ -1031,9 +1061,9 @@ return view.extend({
 			'<text x="150" y="174" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="11" font-weight="700" fill="#E8EEF5" letter-spacing="1.2">cudy</text>' +
 			'<text x="150" y="185" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="7.5" font-weight="600" fill="#8CA4C4" letter-spacing="0.5">TR3000 • 512MB</text>' +
 			'<circle id="cpe_led_tr" cx="132" cy="202" r="2.5" fill="' + (st.f50Online ? '#00e676' : '#ffab00') + '" style="animation: led-blink 1.8s infinite;" />' +
-			'<circle cx="144" cy="202" r="2.5" fill="#00e676" />' +
-			'<circle cx="156" cy="202" r="2.5" fill="#00e676" />' +
-			'<circle cx="168" cy="202" r="2.5" fill="#3b5980" />' +
+			'<circle id="cpe_led_wifi1" cx="144" cy="202" r="2.5" fill="' + (st.wifiUp ? '#00e676' : '#ff5252') + '" />' +
+			'<circle id="cpe_led_wifi2" cx="156" cy="202" r="2.5" fill="' + (st.wifiUp ? '#00e676' : '#ff5252') + '" />' +
+			'<circle cx="168" cy="202" r="2.5" fill="#00e676" />' +
 			'<path d="M225 188 C242 188, 245 160, 260 160" stroke="#7A8B9E" stroke-width="3" stroke-linecap="round" fill="none" />' +
 			'<g transform="translate(258, 126)">' +
 				'<rect x="0" y="0" width="46" height="66" rx="8" fill="url(#f50White)" stroke="#D0D7DE" stroke-width="1.5" filter="drop-shadow(0 6px 12px rgba(0,0,0,0.12))" />' +
@@ -1094,8 +1124,11 @@ return view.extend({
 				])
 			]),
 			E('div', { 'class': 'myos-card', 'style': 'padding: 18px 20px;' }, [
-				E('div', { 'style': 'font-size: 15px; font-weight: 600; margin-bottom: 8px;' }, '主控硬件架构'),
-				E('div', { 'style': 'font-size: 13px; opacity: 0.8;' }, 'MT7981B 双核 A53 @ 1.3GHz • 512MB RAM')
+				E('div', { 'style': 'font-size: 15px; font-weight: 600; margin-bottom: 6px; display: flex; justify-content: space-between;' }, [
+					E('span', {}, '主控硬件与实时负载'),
+					E('span', { 'id': 'cpe_cpu_load', 'style': 'font-size: 12px; color: #c9933e; font-weight: 600;' }, '负载: ' + st.load1m)
+				]),
+				E('div', { 'id': 'cpe_uptime', 'style': 'font-size: 12px; opacity: 0.8;' }, 'MT7981B 双核 1.3GHz • 已运行: ' + st.uptimeStr)
 			])
 		]);
 
@@ -1116,7 +1149,7 @@ return view.extend({
 			])
 		]);
 
-		// 注册 5 秒无感定时轮询：仅局部更新 DOM 数值与状态色，不重绘 SVG 动画避免闪烁
+		// 注册 5 秒无感定时轮询：局部刷新全部卡片数据与 SVG 状态指示灯
 		poll.add(function() {
 			return fetchDashboardData().then(function(newData) {
 				var s = parseDashboardData(newData);
@@ -1132,6 +1165,8 @@ return view.extend({
 				setTxt('cpe_f50_dev', s.activeDevice);
 				setTxt('cpe_f50_mtu', s.realMtu);
 				setTxt('cpe_f50_offload', s.offloadText);
+				setTxt('cpe_cpu_load', '负载: ' + s.load1m);
+				setTxt('cpe_uptime', 'MT7981B 双核 1.3GHz • 已运行: ' + s.uptimeStr);
 				setTxt('cpe_mem_pct', s.memPercent + '% 内存占用');
 				setTxt('cpe_mem_detail', 'RAM 真实负载: ' + s.usedMem + ' MB / ' + s.totalMem + ' MB');
 				setTxt('cpe_overlay_detail', s.overlayText);
@@ -1153,6 +1188,10 @@ return view.extend({
 
 				var ledTr = document.getElementById('cpe_led_tr');
 				if (ledTr) ledTr.setAttribute('fill', s.f50Online ? '#00e676' : '#ffab00');
+				var ledW1 = document.getElementById('cpe_led_wifi1');
+				if (ledW1) ledW1.setAttribute('fill', s.wifiUp ? '#00e676' : '#ff5252');
+				var ledW2 = document.getElementById('cpe_led_wifi2');
+				if (ledW2) ledW2.setAttribute('fill', s.wifiUp ? '#00e676' : '#ff5252');
 				var ledF501 = document.getElementById('cpe_led_f50_1');
 				if (ledF501) ledF501.setAttribute('fill', s.f50Online ? '#00e676' : '#ff5252');
 				var ledF502 = document.getElementById('cpe_led_f50_2');
