@@ -591,10 +591,10 @@ EOF
 chmod +x package/base-files/files/etc/uci-defaults/99-f50-watchdog-cron || true
 
 # ==============================================================================
-# 14. 注入标准兼容版 CPE-MYOS 深度美化层 (防污染作用域 + 动效登录页 + 健壮渲染容错)
+# 14. 注入标准兼容版 CPE-MYOS 深度美化层 (登录直达看板 + 5秒无感实时刷新 + 全真硬件探针)
 # ==============================================================================
 
-# 1. 编译期部署独立样式表
+# 1. 编译期部署独立样式表 (兼容系统级深浅色与 Argon 手动深色切换)
 mkdir -p package/base-files/files/www/luci-static/resources || true
 cat << 'EOF' > package/base-files/files/www/luci-static/resources/cpe_myos_override.css
 /* ==========================================================================
@@ -614,10 +614,12 @@ cat << 'EOF' > package/base-files/files/www/luci-static/resources/cpe_myos_overr
 }
 
 @media (prefers-color-scheme: light) {
-    body:not(.login):not(.login-page) {
+    body:not(.login):not(.login-page):not([data-theme="dark"]):not(.dark) {
         background-color: var(--cpe-bg-main) !important;
     }
-    .main-left, nav#mainmenu, .navigation {
+    body:not([data-theme="dark"]):not(.dark) .main-left,
+    body:not([data-theme="dark"]):not(.dark) nav#mainmenu,
+    body:not([data-theme="dark"]):not(.dark) .navigation {
         background-color: var(--cpe-bg-sidebar) !important;
         border-right: 1px solid var(--cpe-border) !important;
     }
@@ -782,7 +784,7 @@ body.login .cbi-button-action {
 }
 
 /* ==========================================================================
-   2.5 系统级自适应深色模式与磨砂毛玻璃 HUD 增强
+   2.5 系统级自适应深色模式与 Argon 手动暗色模式双兼容
    ========================================================================== */
 @media (prefers-color-scheme: dark) {
     :root {
@@ -796,6 +798,19 @@ body.login .cbi-button-action {
     .myos-card {
         color: #F2F2F7 !important;
     }
+}
+
+body[data-theme="dark"], body.dark {
+    --cpe-bg-main: #121316 !important;
+    --cpe-bg-card: rgba(26, 28, 34, 0.92) !important;
+    --cpe-bg-sidebar: #181a20 !important;
+    --cpe-border: rgba(255, 255, 255, 0.08) !important;
+    --myos-text-primary: #F2F2F7 !important;
+    --myos-text-secondary: #98989D !important;
+}
+
+body[data-theme="dark"] .myos-card, body.dark .myos-card {
+    color: #F2F2F7 !important;
 }
 
 html, body {
@@ -847,7 +862,7 @@ for CSS_FILE in $(find package/ feeds/ -type f -name "cascade.css" 2>/dev/null |
     fi
 done
 
-# 3. 部署真动态版 CPE 聚合看板 (带 5 秒原生 poll 自动实时刷新)
+# 3. 部署全真动态 + 5秒无感实时刷新版 CPE 聚合看板
 mkdir -p package/base-files/files/www/luci-static/resources/view/status || true
 cat << 'EOF' > package/base-files/files/www/luci-static/resources/view/status/cpe_dashboard.js
 'use strict';
@@ -868,101 +883,104 @@ var callNetworkInterfaces = rpc.declare({
 	method: 'dump'
 });
 
+function fetchDashboardData() {
+	return Promise.all([
+		callSystemInfo().catch(function() { return {}; }),
+		fs.lines('/proc/net/arp').catch(function() { return []; }),
+		callNetworkInterfaces().catch(function() { return { interface: [] }; }),
+		fs.exec('/bin/df', ['-m', '/overlay']).catch(function() { return { stdout: '' }; }),
+		uci.load('network').catch(function() {}),
+		uci.load('firewall').catch(function() {}),
+		uci.load('wireless').catch(function() {})
+	]);
+}
+
+function parseDashboardData(data) {
+	var info = (data && typeof data[0] === 'object' && data[0] !== null) ? data[0] : {};
+	var arpLines = (data && Array.isArray(data[1])) ? data[1] : [];
+	var ifaceData = (data && typeof data[2] === 'object' && data[2] !== null && Array.isArray(data[2].interface)) ? data[2].interface : [];
+	var dfOut = (data && data[3] && typeof data[3].stdout === 'string') ? data[3].stdout : '';
+
+	var clientCount = 0;
+	if (Array.isArray(arpLines)) {
+		clientCount = arpLines.filter(function(line) {
+			if (typeof line !== 'string') return false;
+			var p = line.trim().split(/\s+/);
+			return p.length >= 6 && p[2] === '0x2' && p[3] !== '00:00:00:00:00:00';
+		}).length;
+	}
+
+	var f50Online = false;
+	var f50HasIP = false;
+	var activeDevice = '未就绪';
+	for (var i = 0; i < ifaceData.length; i++) {
+		if (ifaceData[i].interface === 'f50') {
+			if (ifaceData[i].up) {
+				f50Online = true;
+				activeDevice = ifaceData[i].l3_device || ifaceData[i].device || 'eth2';
+				if (Array.isArray(ifaceData[i]['ipv4-address']) && ifaceData[i]['ipv4-address'].length > 0) {
+					f50HasIP = true;
+				}
+			}
+			break;
+		}
+	}
+
+	var realMtu = uci.get('network', 'f50', 'mtu') || '1420';
+	var hwOffload = uci.get('firewall', '@defaults[0]', 'flow_offloading_hw') === '1';
+	var swOffload = uci.get('firewall', '@defaults[0]', 'flow_offloading') === '1';
+	var offloadText = hwOffload ? 'MTK PPE 硬件加速已开启' : (swOffload ? '软件流量分载已开启' : '未开启');
+
+	var wifiUp = true;
+	var htMode5g = 'HE160';
+	var radios = uci.sections('wireless', 'wifi-device');
+	for (var r = 0; r < radios.length; r++) {
+		if (radios[r].band === '5g') {
+			htMode5g = radios[r].htmode || 'HE80';
+			if (radios[r].disabled === '1') wifiUp = false;
+		}
+	}
+
+	var overlayText = '读取中...';
+	if (dfOut) {
+		var dfLines = dfOut.trim().split('\n');
+		if (dfLines.length >= 2) {
+			var cols = dfLines[dfLines.length - 1].trim().split(/\s+/);
+			if (cols.length >= 4) {
+				overlayText = cols[3] + ' MB 可用 / 共 ' + cols[1] + ' MB';
+			}
+		}
+	}
+
+	var mem = info.memory || {};
+	var totalMem = Math.round((typeof mem.total === 'number' ? mem.total : 536870912) / 1048576);
+	var availMem = Math.round((typeof mem.available === 'number' ? mem.available : ((mem.free || 0) + (mem.buffered || 0) + (mem.cached || 0))) / 1048576);
+	var usedMem = Math.max(0, totalMem - availMem);
+	var memPercent = totalMem > 0 ? Math.round((usedMem / totalMem) * 100) : 0;
+
+	return {
+		clientCount: clientCount,
+		f50Online: f50Online,
+		f50HasIP: f50HasIP,
+		activeDevice: activeDevice,
+		realMtu: realMtu,
+		offloadText: offloadText,
+		wifiUp: wifiUp,
+		htMode5g: htMode5g,
+		overlayText: overlayText,
+		usedMem: usedMem,
+		totalMem: totalMem,
+		memPercent: memPercent
+	};
+}
+
 return view.extend({
 	load: function() {
-		return Promise.all([
-			callSystemInfo().catch(function() { return {}; }),
-			fs.lines('/proc/net/arp').catch(function() { return []; }),
-			callNetworkInterfaces().catch(function() { return { interface: [] }; }),
-			fs.exec('/bin/df', ['-m', '/overlay']).catch(function() { return { stdout: '' }; }),
-			uci.load('firewall').catch(function() {}),
-			uci.load('wireless').catch(function() {})
-		]);
+		return fetchDashboardData();
 	},
 
 	render: function(data) {
-		var view = this;
-		
-		function updateValues(data) {
-			var info = (data && typeof data[0] === 'object' && data[0] !== null) ? data[0] : {};
-			var arpLines = (data && Array.isArray(data[1])) ? data[1] : [];
-			var ifaceData = (data && typeof data[2] === 'object' && data[2] !== null && Array.isArray(data[2].interface)) ? data[2].interface : [];
-			var dfOut = (data && data[3] && typeof data[3].stdout === 'string') ? data[3].stdout : '';
-
-			var clientCount = 0;
-			if (Array.isArray(arpLines)) {
-				clientCount = arpLines.filter(function(line) {
-					if (typeof line !== 'string') return false;
-					var p = line.trim().split(/\s+/);
-					return p.length >= 6 && p[2] === '0x2' && p[3] !== '00:00:00:00:00:00';
-				}).length;
-			}
-
-			var f50Online = false;
-			var f50HasIP = false;
-			var activeDevice = '未就绪';
-			for (var i = 0; i < ifaceData.length; i++) {
-				if (ifaceData[i].interface === 'f50') {
-					if (ifaceData[i].up) {
-						f50Online = true;
-						activeDevice = ifaceData[i].l3_device || ifaceData[i].device || 'eth2';
-						if (Array.isArray(ifaceData[i]['ipv4-address']) && ifaceData[i]['ipv4-address'].length > 0) {
-							f50HasIP = true;
-						}
-					}
-					break;
-				}
-			}
-
-			var realMtu = uci.get('network', 'f50', 'mtu') || '1420';
-			var hwOffload = uci.get('firewall', '@defaults[0]', 'flow_offloading_hw') === '1';
-			var swOffload = uci.get('firewall', '@defaults[0]', 'flow_offloading') === '1';
-			var offloadText = hwOffload ? 'MTK PPE 硬件加速已开启' : (swOffload ? '软件流量分载已开启' : '未开启');
-
-			var wifiUp = true;
-			var htMode5g = 'HE160';
-			var radios = uci.sections('wireless', 'wifi-device');
-			for (var r = 0; r < radios.length; r++) {
-				if (radios[r].band === '5g') {
-					htMode5g = radios[r].htmode || 'HE80';
-					if (radios[r].disabled === '1') wifiUp = false;
-				}
-			}
-
-			var overlayText = '读取中...';
-			if (dfOut) {
-				var dfLines = dfOut.trim().split('\n');
-				if (dfLines.length >= 2) {
-					var cols = dfLines[dfLines.length - 1].trim().split(/\s+/);
-					if (cols.length >= 4) {
-						overlayText = cols[3] + ' MB 可用 / 共 ' + cols[1] + ' MB';
-					}
-				}
-			}
-
-			var mem = info.memory || {};
-			var totalMem = Math.round((typeof mem.total === 'number' ? mem.total : 536870912) / 1048576);
-			var availMem = Math.round((typeof mem.available === 'number' ? mem.available : ((mem.free || 0) + (mem.buffered || 0) + (mem.cached || 0))) / 1048576);
-			var usedMem = Math.max(0, totalMem - availMem);
-			var memPercent = totalMem > 0 ? Math.round((usedMem / totalMem) * 100) : 0;
-
-			return {
-				clientCount: clientCount,
-				f50Online: f50Online,
-				f50HasIP: f50HasIP,
-				activeDevice: activeDevice,
-				realMtu: realMtu,
-				offloadText: offloadText,
-				wifiUp: wifiUp,
-				htMode5g: htMode5g,
-				overlayText: overlayText,
-				usedMem: usedMem,
-				totalMem: totalMem,
-				memPercent: memPercent
-			};
-		}
-
-		var d = updateValues(data);
+		var st = parseDashboardData(data);
 
 		var styleNode = E('style', {}, [
 			'@keyframes ripple-wave { 0% { transform: scale(0.8); opacity: 0.8; } 100% { transform: scale(1.4); opacity: 0; } }',
@@ -971,9 +989,10 @@ return view.extend({
 			'.myos-dashboard { display: grid; grid-template-columns: 1.35fr 1fr; gap: 20px; margin-bottom: 24px; }',
 			'.myos-card { background: var(--cpe-bg-card, #ffffff); color: var(--myos-text-primary, #1e1e1e); border-radius: 20px; border: 1px solid var(--cpe-border, #edeae2); box-shadow: 0 4px 20px rgba(0,0,0,0.025); padding: 24px; position: relative; }',
 			'.model-canvas { display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 400px; position: relative; overflow: hidden; }',
-			'.wave-base { position: absolute; width: 280px; height: 90px; border-radius: 50%; border: 2px solid rgba(41, 128, 185, 0.45); bottom: 65px; z-index: 1; animation: ripple-wave 2.8s infinite cubic-bezier(0, 0.2, 0.8, 1); }',
+			'.wave-base { position: absolute; width: 280px; height: 90px; border-radius: 50%; border: 2px solid ' + (st.f50Online ? 'rgba(41, 128, 185, 0.45)' : 'rgba(160, 160, 160, 0.3)') + '; bottom: 65px; z-index: 1; animation: ripple-wave 2.8s infinite cubic-bezier(0, 0.2, 0.8, 1); }',
 			'.wave-base-2 { animation-delay: 1.4s; }',
-			'.device-model-svg { z-index: 2; filter: drop-shadow(0 16px 24px rgba(27, 42, 74, 0.16)); }',
+			'.device-model-svg { z-index: 2; filter: drop-shadow(0 16px 24px rgba(27, 42, 74, 0.16)); transition: transform 0.3s ease; }',
+			'.device-model-svg:hover { transform: translateY(-3px); }',
 			'.stat-grid-right { display: flex; flex-direction: column; gap: 16px; }',
 			'.status-pill { display: inline-flex; align-items: center; padding: 4px 12px; border-radius: 20px; font-size: 12px; font-weight: 500; }',
 			'.pill-online { background: #eafaf1; color: #27ae60; }',
@@ -1009,9 +1028,9 @@ return view.extend({
 			'</g>' +
 			'<rect x="75" y="150" width="150" height="68" rx="12" fill="url(#trBlueBody)" stroke="#1a2e4c" stroke-width="1.5" />' +
 			'<path d="M85 152 L215 152" stroke="#4872a8" stroke-width="2" stroke-linecap="round" opacity="0.65" />' +
-			'<text x="150" y="174" text-anchor="middle" font-family="-apple-system, sans-serif" font-size="11" font-weight="700" fill="#E8EEF5" letter-spacing="1.2">cudy</text>' +
-			'<text x="150" y="185" text-anchor="middle" font-family="-apple-system, sans-serif" font-size="7.5" font-weight="600" fill="#8CA4C4" letter-spacing="0.5">TR3000 • 512MB</text>' +
-			'<circle cx="132" cy="202" r="2.5" fill="#00e676" style="animation: led-blink 1.8s infinite;" />' +
+			'<text x="150" y="174" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="11" font-weight="700" fill="#E8EEF5" letter-spacing="1.2">cudy</text>' +
+			'<text x="150" y="185" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="7.5" font-weight="600" fill="#8CA4C4" letter-spacing="0.5">TR3000 • 512MB</text>' +
+			'<circle id="cpe_led_tr" cx="132" cy="202" r="2.5" fill="' + (st.f50Online ? '#00e676' : '#ffab00') + '" style="animation: led-blink 1.8s infinite;" />' +
 			'<circle cx="144" cy="202" r="2.5" fill="#00e676" />' +
 			'<circle cx="156" cy="202" r="2.5" fill="#00e676" />' +
 			'<circle cx="168" cy="202" r="2.5" fill="#3b5980" />' +
@@ -1021,28 +1040,28 @@ return view.extend({
 				'<text x="23" y="20" text-anchor="middle" font-family="-apple-system, sans-serif" font-size="7.5" font-weight="800" fill="#2E3A4B">ZTE</text>' +
 				'<text x="23" y="34" text-anchor="middle" font-family="-apple-system, sans-serif" font-size="9" font-weight="900" fill="#C9933E" letter-spacing="0.5">5G+</text>' +
 				'<text x="23" y="44" text-anchor="middle" font-family="-apple-system, sans-serif" font-size="6" font-weight="600" fill="#8892A0">F50 Portable</text>' +
-				'<circle cx="17" cy="54" r="2" fill="#00e676" style="animation: f50-pulse 1.5s infinite;" />' +
-				'<circle cx="29" cy="54" r="2" fill="#00e676" />' +
+				'<circle id="cpe_led_f50_1" cx="17" cy="54" r="2" fill="' + (st.f50Online ? '#00e676' : '#ff5252') + '" style="' + (st.f50Online ? 'animation: f50-pulse 1.5s infinite;' : '') + '" />' +
+				'<circle id="cpe_led_f50_2" cx="29" cy="54" r="2" fill="' + (st.f50Online ? '#00e676' : '#999') + '" />' +
 			'</g>' +
 		'</svg>';
 
 		var modelWrapper = E('div', { 'class': 'myos-card model-canvas' }, [
 			E('div', { 'style': 'position: absolute; top: 22px; left: 24px; text-align: left;' }, [
-				E('div', { 'id': 'lbl_f50_title', 'style': 'font-size: 20px; font-weight: 700; margin-bottom: 4px;' }, 
-					(d.f50Online && d.f50HasIP) ? '蜂窝 5G 聚合网络已连接' : '蜂窝网络重连中 / 未就绪'),
+				E('div', { 'id': 'cpe_title_status', 'style': 'font-size: 20px; font-weight: 700; margin-bottom: 4px;' }, 
+					(st.f50Online && st.f50HasIP) ? '蜂窝 5G 聚合网络已连接' : '蜂窝网络重连中 / 未就绪'),
 				E('div', { 'style': 'font-size: 13px; opacity: 0.75;' }, 'Cudy TR3000 (哑光蓝双天线) + 中兴 F50 5G 便携联动')
 			]),
-			E('div', { 'class': 'wave-base' }),
-			E('div', { 'class': 'wave-base wave-base-2' }),
+			E('div', { 'id': 'cpe_wave_1', 'class': 'wave-base' }),
+			E('div', { 'id': 'cpe_wave_2', 'class': 'wave-base wave-base-2' }),
 			(function() {
 				var div = E('div', { 'style': 'position: relative; z-index: 2;' });
 				div.innerHTML = deviceSvg;
 				return div;
 			})(),
 			E('div', { 'style': 'margin-top: 12px; z-index: 3;' }, [
-				E('span', { 'id': 'pill_f50_status', 'class': 'status-pill ' + (d.f50Online ? 'pill-online' : 'pill-offline') }, [
-					E('span', { 'style': 'margin-right: 6px; font-size: 14px;' }, d.f50Online ? '●' : '○'),
-					E('span', { 'id': 'txt_f50_sub' }, d.f50Online ? ('5G 全双工透传 • MTU ' + d.realMtu + ' 优化') : 'F50 等待握手或看门狗介入')
+				E('span', { 'id': 'cpe_pill_box', 'class': 'status-pill ' + (st.f50Online ? 'pill-online' : 'pill-offline') }, [
+					E('span', { 'id': 'cpe_pill_dot', 'style': 'margin-right: 6px; font-size: 14px;' }, st.f50Online ? '●' : '○'),
+					E('span', { 'id': 'cpe_pill_text' }, st.f50Online ? ('5G 全双工透传 • MTU ' + st.realMtu + ' 优化') : 'F50 等待握手或看门狗介入')
 				])
 			])
 		]);
@@ -1051,27 +1070,27 @@ return view.extend({
 			E('div', { 'class': 'myos-card', 'style': 'padding: 16px 20px; display: flex; justify-content: space-between; align-items: center;' }, [
 				E('div', {}, [
 					E('div', { 'style': 'font-size: 15px; font-weight: 600;' }, 'Wi-Fi 6 双频无线'),
-					E('div', { 'id': 'lbl_wifi_band', 'style': 'font-size: 12px; opacity: 0.7; margin-top: 2px;' }, 'AX3000 • 5G 频宽模式: ' + d.htMode5g)
+					E('div', { 'id': 'cpe_wifi_desc', 'style': 'font-size: 12px; opacity: 0.7; margin-top: 2px;' }, 'AX3000 • 5G 频宽模式: ' + st.htMode5g)
 				]),
-				E('span', { 'id': 'pill_wifi_status', 'class': 'status-pill ' + (d.wifiUp ? 'pill-online' : 'pill-offline') }, d.wifiUp ? '运行中' : '已关闭')
+				E('span', { 'id': 'cpe_wifi_pill', 'class': 'status-pill ' + (st.wifiUp ? 'pill-online' : 'pill-offline') }, st.wifiUp ? '运行中' : '已关闭')
 			]),
 			E('div', { 'class': 'myos-card', 'style': 'padding: 16px 20px; display: flex; justify-content: space-between; align-items: center;' }, [
 				E('div', {}, [
 					E('div', { 'style': 'font-size: 15px; font-weight: 600;' }, '已连接设备'),
-					E('div', { 'style': 'font-size: 12px; opacity: 0.7; margin-top: 2px;' }, '当前局域网在线客户端')
+					E('div', { 'style': 'font-size: 12px; opacity: 0.7; margin-top: 2px;' }, '当前局域网在线客户端 (5秒实时刷新)')
 				]),
-				E('div', { 'id': 'lbl_client_count', 'style': 'font-size: 22px; font-weight: 700; color: #c9933e;' }, d.clientCount + ' 台')
+				E('div', { 'id': 'cpe_client_count', 'style': 'font-size: 22px; font-weight: 700; color: #c9933e;' }, st.clientCount + ' 台')
 			]),
 			E('div', { 'class': 'myos-card', 'style': 'padding: 18px 20px;' }, [
 				E('div', { 'style': 'font-size: 15px; font-weight: 600; margin-bottom: 12px; display: flex; justify-content: space-between;' }, [
 					E('span', {}, '5G 调制解调器 (ZTE F50)'),
-					E('span', { 'id': 'lbl_f50_state', 'style': 'font-size: 12px; color: #c9933e; font-weight: 500;' }, d.f50Online ? 'RNDIS / CDC-NCM 正常' : '未连接')
+					E('span', { 'id': 'cpe_f50_proto', 'style': 'font-size: 12px; color: #c9933e; font-weight: 500;' }, st.f50Online ? 'RNDIS / CDC-NCM 正常' : '未连接')
 				]),
 				E('div', { 'style': 'display: grid; grid-template-columns: 1fr 1fr; gap: 8px; font-size: 12px;' }, [
-					E('div', { 'style': 'opacity: 0.7;' }, [ '设备节点: ', E('strong', { 'id': 'val_dev' }, d.activeDevice) ]),
-					E('div', { 'style': 'opacity: 0.7;' }, [ '当前 MTU: ', E('strong', { 'id': 'val_mtu' }, d.realMtu) ]),
+					E('div', { 'style': 'opacity: 0.7;' }, [ '设备节点: ', E('strong', { 'id': 'cpe_f50_dev' }, st.activeDevice) ]),
+					E('div', { 'style': 'opacity: 0.7;' }, [ '当前 MTU: ', E('strong', { 'id': 'cpe_f50_mtu' }, st.realMtu) ]),
 					E('div', { 'style': 'opacity: 0.7;' }, [ '保活巡检: ', E('strong', {}, '3分钟心跳自愈') ]),
-					E('div', { 'style': 'opacity: 0.7;' }, [ '加速状态: ', E('strong', { 'id': 'val_offload' }, d.offloadText) ])
+					E('div', { 'style': 'opacity: 0.7;' }, [ '加速状态: ', E('strong', { 'id': 'cpe_f50_offload' }, st.offloadText) ])
 				])
 			]),
 			E('div', { 'class': 'myos-card', 'style': 'padding: 18px 20px;' }, [
@@ -1086,75 +1105,58 @@ return view.extend({
 					E('strong', { 'style': 'font-size: 15px;' }, '内存与 512MB 闪存空间'),
 					E('span', { 'style': 'font-size: 12px; opacity: 0.7; margin-left: 10px;' }, '512MB DDR3 • 512MB SPI-NAND (mod-490)')
 				]),
-				E('div', { 'id': 'lbl_mem_percent', 'style': 'font-size: 14px; font-weight: 600; color: #c9933e;' }, d.memPercent + '% 内存占用')
+				E('div', { 'id': 'cpe_mem_pct', 'style': 'font-size: 14px; font-weight: 600; color: #c9933e;' }, st.memPercent + '% 内存占用')
 			]),
-			E('div', { 'style': 'width: 100%; height: 10px; background: rgba(0,0,0,0.06); border-radius: 6px; overflow: hidden; display: flex; margin-bottom: 8px;' }, [
-				E('div', { 'id': 'bar_mem', 'style': 'width: ' + d.memPercent + '%; background: linear-gradient(90deg, #c9933e, #f1c40f); height: 100%; border-radius: 6px;' })
+			E('div', { 'width': '100%', 'height': '10px', 'style': 'width: 100%; height: 10px; background: rgba(0,0,0,0.06); border-radius: 6px; overflow: hidden; display: flex; margin-bottom: 8px;' }, [
+				E('div', { 'id': 'cpe_mem_bar', 'style': 'width: ' + st.memPercent + '%; background: linear-gradient(90deg, #c9933e, #f1c40f); height: 100%; border-radius: 6px; transition: width 0.4s ease;' })
 			]),
 			E('div', { 'style': 'display: flex; justify-content: space-between; font-size: 12px; opacity: 0.75;' }, [
-				E('span', { 'id': 'lbl_ram_detail' }, 'RAM 真实负载: ' + d.usedMem + ' MB / ' + d.totalMem + ' MB'),
-				E('span', {}, [ 'RootFS Overlay 真实空间: ', E('strong', { 'id': 'lbl_overlay', 'style': 'color: #27ae60;' }, d.overlayText) ])
+				E('span', { 'id': 'cpe_mem_detail' }, 'RAM 真实负载: ' + st.usedMem + ' MB / ' + st.totalMem + ' MB'),
+				E('span', {}, [ 'RootFS Overlay 真实空间: ', E('strong', { 'id': 'cpe_overlay_detail', 'style': 'color: #27ae60;' }, st.overlayText) ])
 			])
 		]);
 
-		// 注册 5 秒原生无感轮询（离开页面自动注销）
+		// 注册 5 秒无感定时轮询：仅局部更新 DOM 数值与状态色，不重绘 SVG 动画避免闪烁
 		poll.add(function() {
-			return Promise.all([
-				callSystemInfo().catch(function() { return {}; }),
-				fs.lines('/proc/net/arp').catch(function() { return []; }),
-				callNetworkInterfaces().catch(function() { return { interface: [] }; }),
-				fs.exec('/bin/df', ['-m', '/overlay']).catch(function() { return { stdout: '' }; }),
-				uci.load('firewall').catch(function() {}),
-				uci.load('wireless').catch(function() {})
-			]).then(function(newData) {
-				var nd = updateValues(newData);
+			return fetchDashboardData().then(function(newData) {
+				var s = parseDashboardData(newData);
+				var setTxt = function(id, val) { var el = document.getElementById(id); if (el) el.innerText = val; };
 
-				var f50Title = document.getElementById('lbl_f50_title');
-				if (f50Title) f50Title.innerText = (nd.f50Online && nd.f50HasIP) ? '蜂窝 5G 聚合网络已连接' : '蜂窝网络重连中 / 未就绪';
+				setTxt('cpe_title_status', (s.f50Online && s.f50HasIP) ? '蜂窝 5G 聚合网络已连接' : '蜂窝网络重连中 / 未就绪');
+				setTxt('cpe_pill_dot', s.f50Online ? '●' : '○');
+				setTxt('cpe_pill_text', s.f50Online ? ('5G 全双工透传 • MTU ' + s.realMtu + ' 优化') : 'F50 等待握手或看门狗介入');
+				setTxt('cpe_wifi_desc', 'AX3000 • 5G 频宽模式: ' + s.htMode5g);
+				setTxt('cpe_wifi_pill', s.wifiUp ? '运行中' : '已关闭');
+				setTxt('cpe_client_count', s.clientCount + ' 台');
+				setTxt('cpe_f50_proto', s.f50Online ? 'RNDIS / CDC-NCM 正常' : '未连接');
+				setTxt('cpe_f50_dev', s.activeDevice);
+				setTxt('cpe_f50_mtu', s.realMtu);
+				setTxt('cpe_f50_offload', s.offloadText);
+				setTxt('cpe_mem_pct', s.memPercent + '% 内存占用');
+				setTxt('cpe_mem_detail', 'RAM 真实负载: ' + s.usedMem + ' MB / ' + s.totalMem + ' MB');
+				setTxt('cpe_overlay_detail', s.overlayText);
 
-				var pillF50 = document.getElementById('pill_f50_status');
-				var txtF50Sub = document.getElementById('txt_f50_sub');
-				if (pillF50 && txtF50Sub) {
-					pillF50.className = 'status-pill ' + (nd.f50Online ? 'pill-online' : 'pill-offline');
-					pillF50.firstChild.nodeValue = nd.f50Online ? '● ' : '○ ';
-					txtF50Sub.innerText = nd.f50Online ? ('5G 全双工透传 • MTU ' + nd.realMtu + ' 优化') : 'F50 等待握手或看门狗介入';
-				}
+				var pillBox = document.getElementById('cpe_pill_box');
+				if (pillBox) pillBox.className = 'status-pill ' + (s.f50Online ? 'pill-online' : 'pill-offline');
 
-				var lblWifiBand = document.getElementById('lbl_wifi_band');
-				if (lblWifiBand) lblWifiBand.innerText = 'AX3000 • 5G 频宽模式: ' + nd.htMode5g;
+				var wifiPill = document.getElementById('cpe_wifi_pill');
+				if (wifiPill) wifiPill.className = 'status-pill ' + (s.wifiUp ? 'pill-online' : 'pill-offline');
 
-				var pillWifi = document.getElementById('pill_wifi_status');
-				if (pillWifi) {
-					pillWifi.className = 'status-pill ' + (nd.wifiUp ? 'pill-online' : 'pill-offline');
-					pillWifi.innerText = nd.wifiUp ? '运行中' : '已关闭';
-				}
+				var memBar = document.getElementById('cpe_mem_bar');
+				if (memBar) memBar.style.width = s.memPercent + '%';
 
-				var lblClient = document.getElementById('lbl_client_count');
-				if (lblClient) lblClient.innerText = nd.clientCount + ' 台';
+				var waveColor = s.f50Online ? 'rgba(41, 128, 185, 0.45)' : 'rgba(160, 160, 160, 0.3)';
+				var w1 = document.getElementById('cpe_wave_1');
+				var w2 = document.getElementById('cpe_wave_2');
+				if (w1) w1.style.borderColor = waveColor;
+				if (w2) w2.style.borderColor = waveColor;
 
-				var lblF50State = document.getElementById('lbl_f50_state');
-				if (lblF50State) lblF50State.innerText = nd.f50Online ? 'RNDIS / CDC-NCM 正常' : '未连接';
-
-				var valDev = document.getElementById('val_dev');
-				if (valDev) valDev.innerText = nd.activeDevice;
-
-				var valMtu = document.getElementById('val_mtu');
-				if (valMtu) valMtu.innerText = nd.realMtu;
-
-				var valOffload = document.getElementById('val_offload');
-				if (valOffload) valOffload.innerText = nd.offloadText;
-
-				var lblMem = document.getElementById('lbl_mem_percent');
-				if (lblMem) lblMem.innerText = nd.memPercent + '% 内存占用';
-
-				var barMem = document.getElementById('bar_mem');
-				if (barMem) barMem.style.width = nd.memPercent + '%';
-
-				var lblRam = document.getElementById('lbl_ram_detail');
-				if (lblRam) lblRam.innerText = 'RAM 真实负载: ' + nd.usedMem + ' MB / ' + nd.totalMem + ' MB';
-
-				var lblOverlay = document.getElementById('lbl_overlay');
-				if (lblOverlay) lblOverlay.innerText = nd.overlayText;
+				var ledTr = document.getElementById('cpe_led_tr');
+				if (ledTr) ledTr.setAttribute('fill', s.f50Online ? '#00e676' : '#ffab00');
+				var ledF501 = document.getElementById('cpe_led_f50_1');
+				if (ledF501) ledF501.setAttribute('fill', s.f50Online ? '#00e676' : '#ff5252');
+				var ledF502 = document.getElementById('cpe_led_f50_2');
+				if (ledF502) ledF502.setAttribute('fill', s.f50Online ? '#00e676' : '#999');
 			});
 		}, 5);
 
@@ -1174,13 +1176,19 @@ return view.extend({
 });
 EOF
 
-# 4. 注册菜单与精准 RPCD ACL 权限 (开放 uci 读取与 df 磁盘真实空间查询权限)
+# 4. 注册菜单 (order 设为 0 并接管 admin/status 首位跳转，实现登录直达 CPE 总览) 与 RPCD 权限
 mkdir -p package/base-files/files/usr/share/luci/menu.d || true
 cat << 'EOF' > package/base-files/files/usr/share/luci/menu.d/luci-app-cpe-overview.json
 {
+	"admin/status": {
+		"order": 10,
+		"action": {
+			"type": "firstchild"
+		}
+	},
 	"admin/status/cpe_dashboard": {
 		"title": "CPE 总览",
-		"order": 1,
+		"order": 0,
 		"action": {
 			"type": "view",
 			"path": "status/cpe_dashboard"
@@ -1212,20 +1220,40 @@ cat << 'EOF' > package/base-files/files/usr/share/rpcd/acl.d/luci-app-cpe-overvi
 }
 EOF
 
-# 5. 开机预置：锁定 Argon 默认主题与香槟金主色 + 首行置顶注入 CSS + 刷新 RPCD 缓存
+# 5. 开机预置：锁定 Argon 主题与香槟金主色 + 默认开启 MTK PPE 硬件加速与 5G 160MHz + 刷新缓存
 mkdir -p package/base-files/files/etc/uci-defaults || true
 cat << 'EOF' > package/base-files/files/etc/uci-defaults/99-cpe-theme-init
 # 强制锁定默认主题为 Argon
 uci set luci.main.mediaurlbase='/luci-static/argon'
 uci commit luci
 
-# 同步配置 Argon 插件默认主色调为 MYOS 香槟金 (#c9933e)，开启跟随系统深浅色
+# 同步配置 Argon 默认主色调为 MYOS 香槟金 (#c9933e)
 if uci -q get argon.@global[0] >/dev/null; then
     uci set argon.@global[0].primary='#c9933e'
     uci set argon.@global[0].dark_primary='#c9933e'
     uci set argon.@global[0].mode='normal'
     uci commit argon
 fi
+
+# 默认激活 firewall4 的软件与 MTK 硬件 PPE 流量分载 (Offloading)
+uci set firewall.@defaults[0].flow_offloading='1'
+uci set firewall.@defaults[0].flow_offloading_hw='1'
+uci commit firewall
+
+# 默认将 5GHz Wi-Fi 配置为 160MHz (HE160) 满血频宽并开启双频无线
+for r in radio0 radio1; do
+    BAND=$(uci -q get wireless.$r.band)
+    if [ "$BAND" = "5g" ]; then
+        uci set wireless.$r.htmode='HE160'
+        uci set wireless.$r.country='CN'
+        uci set wireless.$r.disabled='0'
+    elif [ "$BAND" = "2g" ]; then
+        uci set wireless.$r.htmode='HE40'
+        uci set wireless.$r.country='CN'
+        uci set wireless.$r.disabled='0'
+    fi
+done
+uci commit wireless
 
 ARGON_CSS="/www/luci-static/argon/css/cascade.css"
 IMPORT_RULE='@import url("/luci-static/resources/cpe_myos_override.css");'
