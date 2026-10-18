@@ -1,25 +1,49 @@
-name: Build ImmortalWrt (VIKINGYFY 25.x / 512M)
+name: Build Cudy TR3000 Firmware
 
 on:
   repository_dispatch:
-  workflow_dispatch:
   schedule:
     # 国际标准时间(UTC) 每周一 19:00 -> 即北京时间每周二凌晨 03:00 自动触发编译
     - cron: '0 19 * * 1'
+  workflow_dispatch:
+    inputs:
+      repo_source:
+        description: '源码仓库'
+        required: true
+        default: 'VIKINGYFY/immortalwrt'
+        type: choice
+        options:
+          - VIKINGYFY/immortalwrt
+          - immortalwrt/immortalwrt
+      repo_branch:
+        description: '源码分支 (VIKINGYFY填 owrt，官方源填 master 或 openwrt-24.10)'
+        required: true
+        default: 'owrt'
+        type: string
+      extra_config:
+        description: '临时追加的插件配置（多行按换行分隔）'
+        required: false
+        default: ''
+        type: string
+      only_config:
+        description: '仅校验并输出 .config，不进行完整编译'
+        required: false
+        default: false
+        type: boolean
+      clean_release:
+        description: '编译前清理历史 Release 与 Tag'
+        required: false
+        default: true
+        type: boolean
 
 permissions:
   contents: write
 
 env:
-  REPO_URL: https://github.com/VIKINGYFY/immortalwrt.git
-  REPO_BRANCH: owrt
   FEEDS_CONF: Actions-OpenWrt/feeds.conf.default
   CONFIG_FILE: openwrt-mod/.config
   DIY_P1_SH: Actions-OpenWrt/diy-part1.sh
   DIY_P2_SH: Actions-OpenWrt/diy-part2.sh
-  UPLOAD_BIN_DIR: false
-  UPLOAD_FIRMWARE: true
-  UPLOAD_RELEASE: true
   TZ: Asia/Shanghai
 
 jobs:
@@ -29,6 +53,16 @@ jobs:
     steps:
     - name: Checkout
       uses: actions/checkout@v4
+
+    - name: Clean older releases before build
+      uses: dev-drprasad/delete-older-releases@v0.3.3
+      if: github.event.inputs.clean_release == 'true' && github.event.inputs.only_config != 'true'
+      continue-on-error: true
+      with:
+        keep_latest: 2
+        delete_tags: true
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
     - name: Initialization environment
       env:
@@ -46,8 +80,27 @@ jobs:
     - name: Clone source code
       working-directory: /workdir
       run: |
-        git clone $REPO_URL -b $REPO_BRANCH openwrt
+        REPO_PATH="${{ github.event.inputs.repo_source || 'VIKINGYFY/immortalwrt' }}"
+        BRANCH="${{ github.event.inputs.repo_branch || 'owrt' }}"
+        
+        # 防呆保护：如果选了官方源但分支忘了改（还是 owrt），自动切回 master
+        if [ "$REPO_PATH" = "immortalwrt/immortalwrt" ] && [ "$BRANCH" = "owrt" ]; then
+            echo "检测到选择官方源但分支仍为 owrt，自动纠正分支为 master"
+            BRANCH="master"
+        fi
+        # 如果选了 VIKINGYFY 源但分支填了 master，自动切回 owrt
+        if [ "$REPO_PATH" = "VIKINGYFY/immortalwrt" ] && [ "$BRANCH" = "master" ]; then
+            echo "检测到选择 VIKINGYFY 源但分支为 master，自动纠正分支为 owrt"
+            BRANCH="owrt"
+        fi
+
+        FULL_URL="https://github.com/${REPO_PATH}.git"
+        echo "正在克隆源码仓库: $FULL_URL (分支: $BRANCH)"
+        git clone "$FULL_URL" -b "$BRANCH" openwrt
         ln -sf /workdir/openwrt $GITHUB_WORKSPACE/openwrt
+        
+        echo "ACTUAL_REPO=$REPO_PATH" >> $GITHUB_ENV
+        echo "ACTUAL_BRANCH=$BRANCH" >> $GITHUB_ENV
 
     - name: Load custom feeds
       run: |
@@ -64,7 +117,6 @@ jobs:
 
     - name: Load custom configuration
       run: |
-        # 1. 优先匹配并复制配置文件到构建目录
         cd $GITHUB_WORKSPACE
         if [ -f "$CONFIG_FILE" ]; then
             echo "Found config at $CONFIG_FILE"
@@ -74,23 +126,27 @@ jobs:
             cp -f ".config" openwrt/.config
         fi
 
-        # 2. 后执行 DIY 脚本（确保第15节的内核与模块依赖能够正确追加至 .config 尾部）
         chmod +x $DIY_P2_SH
         cd openwrt
         $GITHUB_WORKSPACE/$DIY_P2_SH || true
-        exit 0
 
-    - name: Download package
+        # 追加用户在 Actions 界面临时输入的多行插件配置（放在最后以拥有最高优先级）
+        if [ -n "$EXTRA_CFG" ]; then
+            echo "正在追加临时自定义配置..."
+            printf "\n# --- User Extra Config ---\n%s\n" "$EXTRA_CFG" >> .config
+        fi
+      env:
+        EXTRA_CFG: ${{ github.event.inputs.extra_config }}
+
+    - name: Defconfig and Download packages
       id: package
       run: |
         cd openwrt
-        # 严格锁定编译目标为 cudy_tr3000-512mb-v1
         sed -i 's/CONFIG_TARGET_mediatek_filogic_DEVICE_.*=y/CONFIG_TARGET_mediatek_filogic_DEVICE_cudy_tr3000-512mb-v1=y/g' .config 2>/dev/null || true
         echo "CONFIG_TARGET_mediatek=y" >> .config
         echo "CONFIG_TARGET_mediatek_filogic=y" >> .config
         echo "CONFIG_TARGET_mediatek_filogic_DEVICE_cudy_tr3000-512mb-v1=y" >> .config
 
-        # 依赖锁：强制激活无线协议栈与 MT7981 驱动，避免 defconfig 自动去除
         echo "CONFIG_PACKAGE_kmod-mac80211=y" >> .config
         echo "CONFIG_PACKAGE_kmod-mt76-core=y" >> .config
         echo "CONFIG_PACKAGE_kmod-mt76-connac=y" >> .config
@@ -99,79 +155,79 @@ jobs:
         echo "CONFIG_PACKAGE_mt7981-wo-firmware=y" >> .config
 
         make defconfig
+
+        echo "DEVICE_NAME=_cudy_tr3000-512mb-v1" >> $GITHUB_ENV
+        echo "FILE_DATE=_$(date +"%Y%m%d%H%M")" >> $GITHUB_ENV
+
+        # 若开启了“仅校验并输出 .config”，则在此处直接导出配置并跳过后续下载与编译
+        if [ "${{ github.event.inputs.only_config }}" = "true" ]; then
+            echo "✔ 仅校验 .config 模式已完成，跳过源码下载与固件编译。"
+            mkdir -p /tmp/firmware_out
+            cp -f .config /tmp/firmware_out/.config
+            echo "FIRMWARE=/tmp/firmware_out" >> $GITHUB_ENV
+            echo "ONLY_CONFIG=true" >> $GITHUB_ENV
+            exit 0
+        fi
+
         make download -j8
         find dl -size -1024c -exec ls -l {} \;
         find dl -size -1024c -exec rm -f {} \;
 
     - name: Compile the firmware
       id: compile
+      if: env.ONLY_CONFIG != 'true'
       run: |
         cd openwrt
         echo -e "$(nproc) thread compile"
-        
-        # 1. 预先构建 Host 工具与交叉编译工具链
         make tools/compile -j$(nproc) || make tools/compile -j1 V=s
         make toolchain/compile -j$(nproc) || make toolchain/compile -j1 V=s
-
-        # 2. 顶层统管全流程构建 (原生适配 25.x apk 索引、rootfs 部署与固件生成)
         make -j$(nproc) || make -j1 V=s
-        
         echo "status=success" >> $GITHUB_OUTPUT
-        echo "DEVICE_NAME=_cudy_tr3000-512mb-v1" >> $GITHUB_ENV
-        echo "FILE_DATE=_$(date +"%Y%m%d%H%M")" >> $GITHUB_ENV
 
     - name: Organize files
       id: organize
-      if: steps.compile.outputs.status == 'success' && !cancelled()
+      if: (steps.compile.outputs.status == 'success' || env.ONLY_CONFIG == 'true') && !cancelled()
       run: |
         mkdir -p /tmp/firmware_out
-        cd openwrt/bin/targets/*/*
-        
-        # 提取目标机型专属固件、sysupgrade 镜像及 sha256 校验文件
-        cp -f *cudy_tr3000-512mb-v1*.bin /tmp/firmware_out/ 2>/dev/null || true
-        cp -f *sysupgrade.bin /tmp/firmware_out/ 2>/dev/null || true
-        cp -f sha256sums /tmp/firmware_out/ 2>/dev/null || true
-        
+        if [ "$ONLY_CONFIG" = "true" ]; then
+            cp -f openwrt/.config /tmp/firmware_out/.config
+        else
+            cd openwrt/bin/targets/*/*
+            cp -f *cudy_tr3000-512mb-v1*.bin /tmp/firmware_out/ 2>/dev/null || true
+            cp -f *sysupgrade.bin /tmp/firmware_out/ 2>/dev/null || true
+            cp -f sha256sums /tmp/firmware_out/ 2>/dev/null || true
+        fi
         echo "FIRMWARE=/tmp/firmware_out" >> $GITHUB_ENV
         echo "status=success" >> $GITHUB_OUTPUT
 
-    - name: Upload firmware directory to Artifacts
+    - name: Upload firmware or config to Artifacts
       uses: actions/upload-artifact@v4
       if: steps.organize.outputs.status == 'success' && !cancelled()
       with:
-        name: OpenWrt_firmware${{ env.DEVICE_NAME }}${{ env.FILE_DATE }}
+        name: ${{ env.ONLY_CONFIG == 'true' && format('Checked_Config{0}{1}', env.DEVICE_NAME, env.FILE_DATE) || format('OpenWrt_firmware{0}{1}', env.DEVICE_NAME, env.FILE_DATE) }}
         path: ${{ env.FIRMWARE }}
+        include-hidden-files: true
 
     - name: Generate release tag
       id: tag
-      if: env.UPLOAD_RELEASE == 'true' && steps.compile.outputs.status == 'success' && !cancelled()
+      if: env.ONLY_CONFIG != 'true' && steps.compile.outputs.status == 'success' && !cancelled()
       run: |
         echo "release_tag=ImmortalWrt-$(date +"%Y.%m.%d-%H%M")" >> $GITHUB_OUTPUT
         touch release.txt
         echo "🚀 Cudy TR3000 (512MB Flash) 专属固件发布" >> release.txt
         echo "--------------------------------------------------" >> release.txt
-        echo "• 源码分支: VIKINGYFY/immortalwrt (owrt 25.x / Linux 6.18)" >> release.txt
+        echo "• 源码仓库: ${{ env.ACTUAL_REPO }} (${{ env.ACTUAL_BRANCH }})" >> release.txt
         echo "• 默认后台: 192.168.6.1" >> release.txt
         echo "• 硬件分区: U-Boot 请选择 mod-490 布局" >> release.txt
-        echo "• 预置功能: 中兴 F50 5G 即插即用 / MTK 硬件流量分载 / OpenClash 25.x 运行栈 / 安全校验在线升级" >> release.txt
+        echo "• 预置功能: 中兴 F50 5G 即插即用 / MYOS 3D 实时看板 / MTK PPE 硬件加速 / 双模式在线升级" >> release.txt
         echo "status=success" >> $GITHUB_OUTPUT
 
     - name: Upload firmware to release
       uses: softprops/action-gh-release@v2
-      if: steps.tag.outputs.status == 'success' && !cancelled()
+      if: env.ONLY_CONFIG != 'true' && steps.tag.outputs.status == 'success' && !cancelled()
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
         tag_name: ${{ steps.tag.outputs.release_tag }}
         body_path: release.txt
         files: ${{ env.FIRMWARE }}/*
-
-    - name: Delete older releases (保留最新 3 个)
-      uses: dev-drprasad/delete-older-releases@v0.3.3
-      if: steps.tag.outputs.status == 'success' && !cancelled()
-      continue-on-error: true
-      with:
-        keep_latest: 3
-        delete_tags: true
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
