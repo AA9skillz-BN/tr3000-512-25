@@ -35,8 +35,8 @@
 			};
 
 			partition@100000 {
-				label = "orig-env";
-				reg = <0x100000 0x80000>;
+				label = "u-boot-env";
+				reg = <0x100000 0x080000>;
 				read-only;
 			};
 
@@ -47,14 +47,20 @@
 			};
 
 			partition@380000 {
-				label = "fip";
-				reg = <0x380000 0x200000>;
+				label = "bdinfo";
+				reg = <0x380000 0x040000>;
 				read-only;
 			};
 
-			partition@580000 {
+			partition@3c0000 {
+				label = "fip";
+				reg = <0x3c0000 0x200000>;
+				read-only;
+			};
+
+			partition@5c0000 {
 				label = "ubi";
-				reg = <0x580000 0x1ea80000>;
+				reg = <0x5c0000 0x1da40000>;
 			};
 		};
 	};
