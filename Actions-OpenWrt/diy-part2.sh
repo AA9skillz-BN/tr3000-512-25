@@ -4,22 +4,27 @@
 # 1. 修改默认后台 IP 为 192.168.6.1
 sed -i 's/192.168.1.1/192.168.6.1/g' package/base-files/files/bin/config_generate || true
 
-# 2. 智能处理 512MB 设备树 (严禁使用外部旧式 DTS 覆盖源码自带的 NMBM/nvmem 设备树！)
+# ==============================================================================
+# 2. 无损复刻能开机系统的设备树：基于源码原版 mt7981b-cudy-tr3000-v1.dts 原地扩容 ubi
+# ==============================================================================
 DTS_DIR="target/linux/mediatek/dts"
 ORIG_DTS="$DTS_DIR/mt7981b-cudy-tr3000-v1.dts"
-TARGET_DTS="$DTS_DIR/mt7981b-cudy-tr3000-512mb-v1.dts"
 
-if [ -f "$TARGET_DTS" ]; then
-    echo "✔ 检测到源码已原生自带 $TARGET_DTS (含完整 NMBM 与校准分区)，直接保留使用！"
-elif [ -f "$ORIG_DTS" ]; then
-    echo "⚠ 当前源码未自带 512MB DTS，正基于原版 $ORIG_DTS 无损克隆扩容..."
-    cp -f "$ORIG_DTS" "$TARGET_DTS"
-    sed -i 's/Cudy TR3000 v1/Cudy TR3000 512MB v1/g' "$TARGET_DTS"
-    # 仅原地放大 ubi 分区容量，100% 保留原版 NMBM、bdinfo 与 nvmem-layout 结构
-    sed -i '/label = "ubi";/{n;s/reg = <0x5c0000 0x[0-9a-fA-F]*>;/reg = <0x5c0000 0x1da40000>;/;}' "$TARGET_DTS"
+if [ -f "$ORIG_DTS" ]; then
+    echo "✔ 正在对源码原版设备树进行无损扩容 (保留 flash@0、nmbm 与 nvmem 属性)..."
+    
+    # 将原版中 ubi 分区的大小安全替换为 512MB 闪存对应的可用大小 (0x1da40000)
+    # 通过精准匹配 label = "ubi" 下方的 reg 地址，确保绝不破坏其他硬件校准与 bdinfo 分区
+    sed -i '/label = "ubi";/{n;s/reg = <0x5c0000 0x[0-9a-fA-F]*>;/reg = <0x5c0000 0x1da40000>;/;}' "$ORIG_DTS"
+    
+    echo "✔ 设备树 ubi 分区扩容修正完毕！"
+else
+    echo "❌ 错误: 未在源码中找到 $ORIG_DTS，请检查分支！"
 fi
 
-# 3. 智能处理 512MB 机型编译定义 (若源码已自带则直接保留，不重复注入)
+# ==============================================================================
+# 3. 注入 512MB 专属机型定义与完整硬件驱动包
+# ==============================================================================
 FILOGIC_MK="target/linux/mediatek/image/filogic.mk"
 if [ -f "$FILOGIC_MK" ]; then
     HAS_DEV=$(grep -c "cudy_tr3000-512mb-v1" "$FILOGIC_MK" || true)
@@ -31,9 +36,9 @@ define Device/cudy_tr3000-512mb-v1
   DEVICE_VENDOR := Cudy
   DEVICE_MODEL := TR3000
   DEVICE_VARIANT := 512MB v1
-  DEVICE_DTS := mt7981b-cudy-tr3000-512mb-v1
-  DEVICE_DTS_DIR := ../dts
-  SUPPORTED_DEVICES += R47 cudy,tr3000-v1
+  DEVICE_DTS := mt7981b-cudy-tr3000-v1
+  DEVICE_DTS_DIR := .
+  SUPPORTED_DEVICES += cudy,tr3000-v1
   UBINIZE_OPTS := -E 5
   BLOCKSIZE := 128k
   PAGESIZE := 2048
@@ -44,8 +49,6 @@ define Device/cudy_tr3000-512mb-v1
 endef
 TARGET_DEVICES += cudy_tr3000-512mb-v1
 EOF
-    else
-        echo "✔ 检测到 $FILOGIC_MK 已原生包含 cudy_tr3000-512mb-v1 机型定义，直接采用原生定义！"
     fi
 fi
 
