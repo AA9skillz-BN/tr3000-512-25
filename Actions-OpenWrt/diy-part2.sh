@@ -4,14 +4,22 @@
 # 1. 修改默认后台 IP 为 192.168.6.1
 sed -i 's/192.168.1.1/192.168.6.1/g' package/base-files/files/bin/config_generate || true
 
-# 2. 部署 512MB 专属设备树 (DTS)
-DTS_SRC="$GITHUB_WORKSPACE/openwrt-mod/mt7981b-cudy-tr3000-512mb-v1.dts"
-if [ -f "$DTS_SRC" ]; then
-    mkdir -p target/linux/mediatek/dts || true
-    cp -f "$DTS_SRC" target/linux/mediatek/dts/mt7981b-cudy-tr3000-512mb-v1.dts
+# 2. 智能处理 512MB 设备树 (严禁使用外部旧式 DTS 覆盖源码自带的 NMBM/nvmem 设备树！)
+DTS_DIR="target/linux/mediatek/dts"
+ORIG_DTS="$DTS_DIR/mt7981b-cudy-tr3000-v1.dts"
+TARGET_DTS="$DTS_DIR/mt7981b-cudy-tr3000-512mb-v1.dts"
+
+if [ -f "$TARGET_DTS" ]; then
+    echo "✔ 检测到源码已原生自带 $TARGET_DTS (含完整 NMBM 与校准分区)，直接保留使用！"
+elif [ -f "$ORIG_DTS" ]; then
+    echo "⚠ 当前源码未自带 512MB DTS，正基于原版 $ORIG_DTS 无损克隆扩容..."
+    cp -f "$ORIG_DTS" "$TARGET_DTS"
+    sed -i 's/Cudy TR3000 v1/Cudy TR3000 512MB v1/g' "$TARGET_DTS"
+    # 仅原地放大 ubi 分区容量，100% 保留原版 NMBM、bdinfo 与 nvmem-layout 结构
+    sed -i '/label = "ubi";/{n;s/reg = <0x5c0000 0x[0-9a-fA-F]*>;/reg = <0x5c0000 0x1da40000>;/;}' "$TARGET_DTS"
 fi
 
-# 3. 注入 512MB 机型定义 (IMAGE_SIZE 调整为 485000k 完美匹配真实 mtd5 边界)
+# 3. 智能处理 512MB 机型编译定义 (若源码已自带则直接保留，不重复注入)
 FILOGIC_MK="target/linux/mediatek/image/filogic.mk"
 if [ -f "$FILOGIC_MK" ]; then
     HAS_DEV=$(grep -c "cudy_tr3000-512mb-v1" "$FILOGIC_MK" || true)
@@ -22,21 +30,22 @@ if [ -f "$FILOGIC_MK" ]; then
 define Device/cudy_tr3000-512mb-v1
   DEVICE_VENDOR := Cudy
   DEVICE_MODEL := TR3000
-  DEVICE_VARIANT := 512mb v1
+  DEVICE_VARIANT := 512MB v1
   DEVICE_DTS := mt7981b-cudy-tr3000-512mb-v1
   DEVICE_DTS_DIR := ../dts
-  SUPPORTED_DEVICES += R47 cudy,tr3000-v1 \
-                       cudy,tr3000-512mb-v1
+  SUPPORTED_DEVICES += R47 cudy,tr3000-v1
   UBINIZE_OPTS := -E 5
   BLOCKSIZE := 128k
   PAGESIZE := 2048
-  IMAGE_SIZE := 485000k
+  IMAGE_SIZE := 485632k
   KERNEL_IN_UBI := 1
   IMAGE/sysupgrade.bin := sysupgrade-tar | append-metadata
   DEVICE_PACKAGES := kmod-usb3 kmod-mt7915e kmod-mt7981-firmware mt7981-wo-firmware automount
 endef
 TARGET_DEVICES += cudy_tr3000-512mb-v1
 EOF
+    else
+        echo "✔ 检测到 $FILOGIC_MK 已原生包含 cudy_tr3000-512mb-v1 机型定义，直接采用原生定义！"
     fi
 fi
 
