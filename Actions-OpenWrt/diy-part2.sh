@@ -11,7 +11,7 @@ if [ -f "$DTS_SRC" ]; then
     cp -f "$DTS_SRC" target/linux/mediatek/dts/mt7981b-cudy-tr3000-512mb-v1.dts
 fi
 
-# 3. 注入 512MB 机型定义 (IMAGE_SIZE 采用 502272k 避开 Python 整数解析异常，补齐 5G 无线驱动)
+# 3. 注入 512MB 机型定义 (IMAGE_SIZE 调整为 485000k 完美匹配真实 mtd5 边界)
 FILOGIC_MK="target/linux/mediatek/image/filogic.mk"
 if [ -f "$FILOGIC_MK" ]; then
     HAS_DEV=$(grep -c "cudy_tr3000-512mb-v1" "$FILOGIC_MK" || true)
@@ -30,7 +30,7 @@ define Device/cudy_tr3000-512mb-v1
   UBINIZE_OPTS := -E 5
   BLOCKSIZE := 128k
   PAGESIZE := 2048
-  IMAGE_SIZE := 502272k
+  IMAGE_SIZE := 485000k
   KERNEL_IN_UBI := 1
   IMAGE/sysupgrade.bin := sysupgrade-tar | append-metadata
   DEVICE_PACKAGES := kmod-usb3 kmod-mt7915e kmod-mt7981-firmware mt7981-wo-firmware automount
