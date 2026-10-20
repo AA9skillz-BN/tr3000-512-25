@@ -624,16 +624,16 @@ EOF
 chmod +x package/base-files/files/etc/uci-defaults/99-aurora-init || true
 
 # ==============================================================================
-# 15. 强制兜底锁死 Argon 主题、中文包及核心功能模块 (防 .config 路径遗漏)
+# 15. 强制兜底锁死 Aurora 主题、中文包及核心功能模块
 # ==============================================================================
 cat << 'EOF' >> .config
 CONFIG_PACKAGE_luci=y
 CONFIG_PACKAGE_luci-base=y
 CONFIG_PACKAGE_luci-compat=y
 CONFIG_PACKAGE_luci-i18n-base-zh-cn=y
-CONFIG_PACKAGE_luci-theme-argon=y
-CONFIG_PACKAGE_luci-app-argon-config=y
-CONFIG_PACKAGE_luci-i18n-argon-config-zh-cn=y
+CONFIG_PACKAGE_luci-theme-aurora=y
+CONFIG_PACKAGE_luci-app-aurora-config=y
+CONFIG_PACKAGE_luci-i18n-aurora-config-zh-cn=y
 CONFIG_PACKAGE_luci-app-turboacc=y
 CONFIG_PACKAGE_luci-i18n-turboacc-zh-cn=y
 CONFIG_PACKAGE_TURBOACC_INCLUDE_OFFLOADING=y
