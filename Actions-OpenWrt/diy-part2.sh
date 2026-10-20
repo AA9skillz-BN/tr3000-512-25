@@ -266,7 +266,7 @@ return view.extend({
 			'.dot-down { background: #00b4d8; }',
 			'.dot-check { background: #ffb703; }',
 			'.dot-flash { background: #ef233c; }',
-			'.keep-config-box { display: flex; align-items: center; gap: 8px; padding: 10px 14px; border-radius: 10px; background: rgba(201, 147, 62, 0.08); border: 1px solid rgba(201, 147, 62, 0.3); margin-bottom: 15px; width: fit-content; }'
+			'.keep-config-box { display: flex; align-items: center; gap: 8px; padding: 10px 14px; border-radius: 10px; background: rgba(0, 180, 216, 0.08); border: 1px solid rgba(0, 180, 216, 0.3); margin-bottom: 15px; width: fit-content; }'
 		]);
 
 		var progressBar = E('div', { 'class': 'ota-progress-container', 'id': 'ota_progress' }, [
@@ -288,7 +288,7 @@ return view.extend({
 			'type': 'checkbox',
 			'id': 'chk_keep_config',
 			'checked': 'checked',
-			'style': 'width: 16px; height: 16px; cursor: pointer; accent-color: #c9933e;',
+			'style': 'width: 16px; height: 16px; cursor: pointer;',
 			'change': function(ev) {
 				var hint = document.getElementById('keep_config_hint');
 				if (ev.target.checked) {
@@ -415,7 +415,7 @@ return view.extend({
 });
 EOF
 
-# 8. 预置中兴 F50 免驱支持、MTU 1420 及防限速 TTL/HL=65 精准锁定 (抵消 F50 内部路由扣减 1 点)
+# 8. 预置中兴 F50 免驱支持、MTU 1420 及防限速 TTL/HL=65 精准锁定
 mkdir -p package/base-files/files/etc/uci-defaults || true
 
 cat << 'EOF' > package/base-files/files/etc/firewall.ttl
@@ -468,15 +468,14 @@ for i in $(seq 0 10); do
 done
 uci commit firewall
 
+# 仅解禁双频无线并设置频宽，不强制写 country='CN' 以免触发 regulatory 锁死无线射频
 for r in radio0 radio1; do
     BAND=$(uci -q get wireless.$r.band)
     if [ "$BAND" = "5g" ]; then
         uci set wireless.$r.htmode='HE160'
-        uci set wireless.$r.country='CN'
         uci set wireless.$r.disabled='0'
     elif [ "$BAND" = "2g" ]; then
         uci set wireless.$r.htmode='HE40'
-        uci set wireless.$r.country='CN'
         uci set wireless.$r.disabled='0'
     fi
 done
@@ -582,51 +581,70 @@ EOF
 chmod +x package/base-files/files/etc/uci-defaults/99-f50-watchdog-cron || true
 
 # ==============================================================================
-# 14. 移除 MYOS 注入，纯净预置 Aurora 主题与配置
+# 14. 预置 OpenClash 最新 ARM64 Meta (Mihomo) 内核与 GeoIP/GeoSite 规则数据库
 # ==============================================================================
+echo "正在为 Cudy TR3000 (aarch64) 下载并内置 OpenClash Meta (Mihomo) 内核..."
+CORE_DIR="package/base-files/files/etc/openclash/core"
+ETC_OC_DIR="package/base-files/files/etc/openclash"
+mkdir -p "$CORE_DIR"
 
-# 1. 开机预置：默认锁定 Aurora 主题与简体中文
-mkdir -p package/base-files/files/etc/uci-defaults || true
-cat << 'EOF' > package/base-files/files/etc/uci-defaults/99-aurora-init
-uci set luci.main.lang='zh_cn'
-uci set luci.main.mediaurlbase='/luci-static/aurora'
-uci commit luci
-
-# 若 Aurora 主题有全局配置节点，可在此初始化
-if uci -q get aurora.@global[0] >/dev/null; then
-    uci set aurora.@global[0].mode='normal'
-    uci commit aurora
+# 拉取 Vernesong 官方维护的 ARM64 Meta 内核
+META_URL="https://raw.githubusercontent.com/vernesong/OpenClash/core/master/meta/clash-linux-arm64.tar.gz"
+if curl -sL --connect-timeout 15 --retry 3 "$META_URL" -o /tmp/clash_meta.tar.gz; then
+    tar -zxf /tmp/clash_meta.tar.gz -C "$CORE_DIR"
+    mv -f "$CORE_DIR/clash" "$CORE_DIR/clash_meta" 2>/dev/null || true
+    # 同时复制一份为 clash 以兼容旧版调用设置
+    cp -f "$CORE_DIR/clash_meta" "$CORE_DIR/clash" 2>/dev/null || true
+    chmod 0755 "$CORE_DIR/clash_meta" "$CORE_DIR/clash" 2>/dev/null || true
+    rm -f /tmp/clash_meta.tar.gz
+    echo "✔ OpenClash Meta (clash_meta) 内核预置成功！"
+else
+    echo "⚠ 警告: OpenClash Meta 内核下载超时，可在开机后于插件内点击更新内核。"
 fi
 
-# 默认开启 MTK PPE 硬件加速与 5G 160MHz
-uci set firewall.@defaults[0].flow_offloading='1'
-uci set firewall.@defaults[0].flow_offloading_hw='1'
-uci commit firewall
+# 预置 GeoIP (Country.mmdb) 与 GeoSite 数据库，避免开机首次启动卡下载
+curl -sL --connect-timeout 15 --retry 2 "https://raw.githubusercontent.com/alecthw/mmdb_china_ip_list/release/lite/Country.mmdb" -o "$ETC_OC_DIR/Country.mmdb" || true
+curl -sL --connect-timeout 15 --retry 2 "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geosite.dat" -o "$ETC_OC_DIR/GeoSite.dat" || true
+curl -sL --connect-timeout 15 --retry 2 "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geoip.dat" -o "$ETC_OC_DIR/GeoIP.dat" || true
 
-for r in radio0 radio1; do
-    BAND=$(uci -q get wireless.$r.band)
-    if [ "$BAND" = "5g" ]; then
-        uci set wireless.$r.htmode='HE160'
-        uci set wireless.$r.country='CN'
-        uci set wireless.$r.disabled='0'
-    elif [ "$BAND" = "2g" ]; then
-        uci set wireless.$r.htmode='HE40'
-        uci set wireless.$r.country='CN'
-        uci set wireless.$r.disabled='0'
-    fi
-done
-uci commit wireless
+# ==============================================================================
+# 15. 纯净预置 Aurora 主题与 OpenClash 默认启用 Meta 内核 (防 THEME FALLBACK)
+# ==============================================================================
+mkdir -p package/base-files/files/etc/uci-defaults || true
+cat << 'EOF' > package/base-files/files/etc/uci-defaults/99-aurora-and-oc-init
+# 1. 强制锁定简体中文
+uci set luci.main.lang='zh_cn'
+
+# 2. 安全注册并激活 Aurora 主题 (防止 LuCI 25.x 报 THEME FALLBACK)
+if [ -d "/www/luci-static/aurora" ]; then
+    uci set luci.themes.Aurora='/luci-static/aurora'
+    uci set luci.main.mediaurlbase='/luci-static/aurora'
+fi
+uci commit luci
+
+# 3. 确保 OpenClash 默认指向已内置的 Meta 内核并修复权限
+if [ -f "/etc/config/openclash" ]; then
+    uci set openclash.config.core_version='linux-arm64'
+    uci set openclash.config.enable_meta_core='1'
+    uci commit openclash
+fi
+chmod 0755 /etc/openclash/core/clash* 2>/dev/null || true
 
 /etc/init.d/rpcd restart 2>/dev/null || true
 rm -rf /tmp/luci-indexcache /tmp/luci-modulecache/ 2>/dev/null || true
 exit 0
 EOF
-chmod +x package/base-files/files/etc/uci-defaults/99-aurora-init || true
+chmod +x package/base-files/files/etc/uci-defaults/99-aurora-and-oc-init || true
 
 # ==============================================================================
-# 15. 强制兜底锁死 Aurora 主题、中文包及核心功能模块
+# 16. 强制兜底锁死 Aurora 主题、OpenClash 本体及核心依赖
 # ==============================================================================
+sed -i '/luci-theme-argon/d' .config 2>/dev/null || true
+sed -i '/luci-app-argon-config/d' .config 2>/dev/null || true
+
 cat << 'EOF' >> .config
+# CONFIG_PACKAGE_luci-theme-argon is not set
+# CONFIG_PACKAGE_luci-app-argon-config is not set
 CONFIG_PACKAGE_luci=y
 CONFIG_PACKAGE_luci-base=y
 CONFIG_PACKAGE_luci-compat=y
@@ -634,6 +652,9 @@ CONFIG_PACKAGE_luci-i18n-base-zh-cn=y
 CONFIG_PACKAGE_luci-theme-aurora=y
 CONFIG_PACKAGE_luci-app-aurora-config=y
 CONFIG_PACKAGE_luci-i18n-aurora-config-zh-cn=y
+CONFIG_PACKAGE_luci-app-openclash=y
+CONFIG_PACKAGE_dnsmasq-full=y
+CONFIG_PACKAGE_dnsmasq_full_nftset=y
 CONFIG_PACKAGE_luci-app-turboacc=y
 CONFIG_PACKAGE_luci-i18n-turboacc-zh-cn=y
 CONFIG_PACKAGE_TURBOACC_INCLUDE_OFFLOADING=y
@@ -646,6 +667,7 @@ CONFIG_PACKAGE_kmod-usb-net-rndis=y
 CONFIG_PACKAGE_kmod-usb-net-cdc-ether=y
 CONFIG_PACKAGE_kmod-usb-net-cdc-ncm=y
 CONFIG_PACKAGE_kmod-tun=y
+CONFIG_PACKAGE_kmod-inet-diag=y
 CONFIG_PACKAGE_kmod-nft-tproxy=y
 CONFIG_PACKAGE_kmod-nft-socket=y
 CONFIG_PACKAGE_kmod-nft-queue=y
@@ -655,6 +677,10 @@ CONFIG_PACKAGE_ip-full=y
 CONFIG_PACKAGE_ca-bundle=y
 CONFIG_PACKAGE_curl=y
 CONFIG_PACKAGE_jq=y
+CONFIG_PACKAGE_ruby=y
+CONFIG_PACKAGE_ruby-yaml=y
+CONFIG_PACKAGE_libcap=y
+CONFIG_PACKAGE_libcap-bin=y
 CONFIG_PACKAGE_usb-modeswitch=y
 EOF
 
