@@ -41,7 +41,7 @@ permissions:
 
 env:
   FEEDS_CONF: Actions-OpenWrt/feeds.conf.default
-  CONFIG_FILE: openwrt-mod/.config
+  CONFIG_FILE: openwrt-mod/config/.config
   DIY_P1_SH: Actions-OpenWrt/diy-part1.sh
   DIY_P2_SH: Actions-OpenWrt/diy-part2.sh
   TZ: Asia/Shanghai
@@ -83,12 +83,10 @@ jobs:
         REPO_PATH="${{ github.event.inputs.repo_source || 'VIKINGYFY/immortalwrt' }}"
         BRANCH="${{ github.event.inputs.repo_branch || 'owrt' }}"
         
-        # 防呆保护：如果选了官方源但分支忘了改（还是 owrt），自动切回 master
         if [ "$REPO_PATH" = "immortalwrt/immortalwrt" ] && [ "$BRANCH" = "owrt" ]; then
             echo "检测到选择官方源但分支仍为 owrt，自动纠正分支为 master"
             BRANCH="master"
         fi
-        # 如果选了 VIKINGYFY 源但分支填了 master，自动切回 owrt
         if [ "$REPO_PATH" = "VIKINGYFY/immortalwrt" ] && [ "$BRANCH" = "master" ]; then
             echo "检测到选择 VIKINGYFY 源但分支为 master，自动纠正分支为 owrt"
             BRANCH="owrt"
@@ -119,18 +117,26 @@ jobs:
       run: |
         cd $GITHUB_WORKSPACE
         if [ -f "$CONFIG_FILE" ]; then
-            echo "Found config at $CONFIG_FILE"
+            echo "✔ 成功加载配置文件: $CONFIG_FILE"
             cp -f "$CONFIG_FILE" openwrt/.config
+        elif [ -f "openwrt-mod/.config" ]; then
+            echo "✔ 成功加载配置文件: openwrt-mod/.config"
+            cp -f "openwrt-mod/.config" openwrt/.config
         elif [ -f ".config" ]; then
-            echo "Found config at root .config"
+            echo "✔ 成功加载配置文件: .config"
             cp -f ".config" openwrt/.config
+        else
+            FOUND_CFG=$(find . -maxdepth 3 -name ".config" | head -n 1)
+            if [ -n "$FOUND_CFG" ]; then
+                echo "✔ 自动搜索并加载配置文件: $FOUND_CFG"
+                cp -f "$FOUND_CFG" openwrt/.config
+            fi
         fi
 
         chmod +x $DIY_P2_SH
         cd openwrt
         $GITHUB_WORKSPACE/$DIY_P2_SH || true
 
-        # 追加用户在 Actions 界面临时输入的多行插件配置（放在最后以拥有最高优先级）
         if [ -n "$EXTRA_CFG" ]; then
             echo "正在追加临时自定义配置..."
             printf "\n# --- User Extra Config ---\n%s\n" "$EXTRA_CFG" >> .config
@@ -159,7 +165,6 @@ jobs:
         echo "DEVICE_NAME=_cudy_tr3000-512mb-v1" >> $GITHUB_ENV
         echo "FILE_DATE=_$(date +"%Y%m%d%H%M")" >> $GITHUB_ENV
 
-        # 若开启了“仅校验并输出 .config”，则在此处直接导出配置并跳过后续下载与编译
         if [ "${{ github.event.inputs.only_config }}" = "true" ]; then
             echo "✔ 仅校验 .config 模式已完成，跳过源码下载与固件编译。"
             mkdir -p /tmp/firmware_out
