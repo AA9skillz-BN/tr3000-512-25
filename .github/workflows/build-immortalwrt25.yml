@@ -102,7 +102,7 @@ jobs:
 
     - name: Load custom feeds
       run: |
-        [ -e $FEEDS_CONF ] && cp $FEEDS_CONF openwrt/feeds.conf.default
+        [ -e "$FEEDS_CONF" ] && cp "$FEEDS_CONF" openwrt/feeds.conf.default
         chmod +x $DIY_P1_SH
         cd openwrt
         $GITHUB_WORKSPACE/$DIY_P1_SH || true
@@ -159,6 +159,13 @@ jobs:
         echo "CONFIG_PACKAGE_kmod-mt7915e=y" >> .config
         echo "CONFIG_PACKAGE_kmod-mt7981-firmware=y" >> .config
         echo "CONFIG_PACKAGE_mt7981-wo-firmware=y" >> .config
+
+        # 强制锁死中文、Aurora 主题与 OpenClash 本体
+        echo "CONFIG_PACKAGE_luci-i18n-base-zh-cn=y" >> .config
+        echo "CONFIG_PACKAGE_luci-theme-aurora=y" >> .config
+        echo "CONFIG_PACKAGE_luci-app-aurora-config=y" >> .config
+        echo "CONFIG_PACKAGE_luci-i18n-aurora-config-zh-cn=y" >> .config
+        echo "CONFIG_PACKAGE_luci-app-openclash=y" >> .config
 
         make defconfig
 
@@ -224,7 +231,7 @@ jobs:
         echo "• 源码仓库: ${{ env.ACTUAL_REPO }} (${{ env.ACTUAL_BRANCH }})" >> release.txt
         echo "• 默认后台: 192.168.6.1" >> release.txt
         echo "• 硬件分区: U-Boot 请选择 mod-490 布局" >> release.txt
-        echo "• 预置功能: 中兴 F50 5G 即插即用 / MYOS 3D 实时看板 / MTK PPE 硬件加速 / 双模式在线升级" >> release.txt
+        echo "• 预置功能: Aurora 现代主题 / OpenClash (内置 Meta 内核) / 中兴 F50 5G 即插即用 / MTK PPE 硬件加速 / 双模式在线升级" >> release.txt
         echo "status=success" >> $GITHUB_OUTPUT
 
     - name: Upload firmware to release
