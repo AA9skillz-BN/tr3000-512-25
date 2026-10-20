@@ -468,15 +468,29 @@ for i in $(seq 0 10); do
 done
 uci commit firewall
 
-# 仅解禁双频无线并设置频宽，不强制写 country='CN' 以免触发 regulatory 锁死无线射频
+# 深度优化 MT7981B 双频 Wi-Fi 6 (满血 160MHz + 强制 40MHz 抗干扰 + 波束成形)
 for r in radio0 radio1; do
     BAND=$(uci -q get wireless.$r.band)
+    # 清除可能导致 hostapd 锁死的国家码限制，开启硬件波束成形
+    uci -q delete wireless.$r.country
+    uci set wireless.$r.cell_density='0'
+    uci set wireless.$r.mu_beamformer='1'
+    uci set wireless.$r.disabled='0'
+
     if [ "$BAND" = "5g" ]; then
+        uci set wireless.$r.channel='36'
         uci set wireless.$r.htmode='HE160'
-        uci set wireless.$r.disabled='0'
+        # 配置默认 5G SSID 名称与弱信号防踢保护
+        uci set wireless.default_$r.ssid='Cudy-TR3000-5G'
+        uci set wireless.default_$r.disassoc_low_ack='0'
+        uci set wireless.default_$r.wpa_disable_eapol_key_retries='1'
     elif [ "$BAND" = "2g" ]; then
+        uci set wireless.$r.channel='6'
         uci set wireless.$r.htmode='HE40'
-        uci set wireless.$r.disabled='0'
+        uci set wireless.$r.noscan='1'
+        # 配置默认 2.4G SSID 名称与弱信号防踢保护
+        uci set wireless.default_$r.ssid='Cudy-TR3000-2.4G'
+        uci set wireless.default_$r.disassoc_low_ack='0'
     fi
 done
 uci commit wireless
