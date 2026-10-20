@@ -12,11 +12,8 @@ ORIG_DTS="$DTS_DIR/mt7981b-cudy-tr3000-v1.dts"
 
 if [ -f "$ORIG_DTS" ]; then
     echo "✔ 正在对源码原版设备树进行无损扩容 (保留 flash@0、nmbm 与 nvmem 属性)..."
-    
-    # 直接定位 0x5c0000 起始的 ubi 分区，将其大小从原版 128M (0x7a40000 等) 无损替换为 512M 对应的 0x1da40000
     sed -i 's/reg = <0x5c0000 0x[0-9a-fA-F]*>/reg = <0x5c0000 0x1da40000>/g' "$ORIG_DTS"
     sed -i 's/Cudy TR3000 v1/Cudy TR3000 512MB v1/g' "$ORIG_DTS"
-    
     echo "✔ 设备树 ubi 分区扩容修正完毕！"
 else
     echo "❌ 错误: 未在源码中找到 $ORIG_DTS，请检查分支！"
@@ -62,7 +59,6 @@ LOG_FILE="/tmp/firmware_update.log"
 TMP_BIN="/tmp/firmware_upgrade.bin"
 TMP_SHA="/tmp/sha256sums"
 
-# 接收前端传参：若传入 -n 则不保留配置
 UPGRADE_OPTS=""
 MODE_DESC="保留当前配置 (无缝升级)"
 if [ "$1" = "-n" ]; then
@@ -70,7 +66,6 @@ if [ "$1" = "-n" ]; then
     MODE_DESC="不保留配置 (恢复出厂全新刷入)"
 fi
 
-# 国内高可用备选镜像代理前缀
 PROXIES="https://ghfast.top/ https://ghproxy.net/"
 
 > "$LOG_FILE"
@@ -88,7 +83,6 @@ log "=========================================="
 API_URL="https://api.github.com/repos/$REPO/releases/latest"
 RELEASE_JSON=$(curl -sL -m 15 -H "User-Agent: Cudy-TR3000-OTA" "$API_URL")
 
-# API 直连失败时，尝试走加速节点拉取元数据
 if [ -z "$RELEASE_JSON" ] || ! echo "$RELEASE_JSON" | grep -q "tag_name"; then
     log "⚠ 直连 GitHub API 超时，正在尝试加速镜像通道..."
     for P in $PROXIES; do
@@ -117,12 +111,10 @@ log "✔ 发现可用版本: ${TAG_NAME:-最新发布}"
 log "固件直连源: $DOWNLOAD_URL"
 echo "" >> "$LOG_FILE"
 
-# 内存预防性清理，释放缓冲区防止 OOM
 sync
 echo 3 > /proc/sys/vm/drop_caches
 rm -f "$TMP_BIN" "$TMP_SHA"
 
-# 下载文件函数 (直连失败自动切国内加速镜像)
 download_file() {
     local remote_url="$1"
     local output_path="$2"
@@ -150,12 +142,10 @@ download_file() {
     return 1
 }
 
-# 1. 下载哈希清单
 if [ -n "$SHA_URL" ]; then
     download_file "$SHA_URL" "$TMP_SHA" "校验清单 (sha256sums)"
 fi
 
-# 2. 下载系统固件
 download_file "$DOWNLOAD_URL" "$TMP_BIN" "系统固件镜像 (请勿断电)"
 if [ $? -ne 0 ] || [ ! -s "$TMP_BIN" ]; then
     log "❌ 固件下载失败，直连及所有加速通道均不可达，请检查网络！"
@@ -167,7 +157,6 @@ BIN_SIZE=$(ls -lh "$TMP_BIN" | awk '{print $5}')
 log "✔ 固件下载成功，文件大小: $BIN_SIZE"
 echo "" >> "$LOG_FILE"
 
-# 3. SHA256 强校验
 if [ -s "$TMP_SHA" ]; then
     log "正在进行 SHA256 完整性比对..."
     BIN_NAME=$(basename "$DOWNLOAD_URL")
@@ -187,7 +176,6 @@ if [ -s "$TMP_SHA" ]; then
     fi
 fi
 
-# 4. OpenWrt 原生元数据验证
 log "正在执行固件元数据合规检查..."
 if command -v fwtool >/dev/null 2>&1; then
     if ! fwtool -q -i /dev/null "$TMP_BIN" 2>/dev/null; then
@@ -201,13 +189,11 @@ log "✔ 安全校验通过！即将以【$MODE_DESC】模式在 3 秒后写入�
 log "提示: 刷入过程中切勿断电，完成后访问 192.168.6.1"
 log "=========================================="
 
-# 杀掉大内存后台服务保障写入稳定性
 /etc/init.d/openclash stop 2>/dev/null || true
 /etc/init.d/openbox stop 2>/dev/null || true
 sync
 echo 3 > /proc/sys/vm/drop_caches
 
-# 后台解耦执行刷机（根据参数决定是否带 -n）
 ( sleep 3 && sysupgrade $UPGRADE_OPTS "$TMP_BIN" ) >/dev/null 2>&1 &
 exit 0
 EOF
@@ -432,7 +418,6 @@ EOF
 # 8. 预置中兴 F50 免驱支持、MTU 1420 及防限速 TTL/HL=65 精准锁定 (抵消 F50 内部路由扣减 1 点)
 mkdir -p package/base-files/files/etc/uci-defaults || true
 
-# 8.1 部署底层 nftables TTL 锁定脚本 (物理固化进系统镜像，设为 65 确保经 F50 转发后到达基站刚好为 64)
 cat << 'EOF' > package/base-files/files/etc/firewall.ttl
 #!/bin/sh
 nft add table inet fw4 2>/dev/null
@@ -443,7 +428,6 @@ nft add rule inet fw4 f50_ttl oifname '{ "eth2", "usb0" }' ip6 hoplimit set 65 2
 EOF
 chmod +x package/base-files/files/etc/firewall.ttl || true
 
-# 8.2 部署 fw4 原生 nftables 挂载目录 (确保 firewall4 重载或重启时 100% 自动加载)
 mkdir -p package/base-files/files/usr/share/nftables.d/table-post || true
 cat << 'EOF' > package/base-files/files/usr/share/nftables.d/table-post/99-f50-ttl.nft
 chain f50_ttl {
@@ -453,7 +437,6 @@ chain f50_ttl {
 }
 EOF
 
-# 8.3 开机自动绑定网络接口、开启 MTK PPE 硬件加速与 5G 160MHz 频宽
 cat << 'EOF' > package/base-files/files/etc/uci-defaults/99-f50-hotplug
 uci set network.f50=interface
 uci set network.f50.proto='dhcp'
@@ -472,7 +455,6 @@ if [ -n "$DEV" ]; then
 fi
 uci commit network
 
-# 真正开启 firewall4 的软件与 MTK 硬件 PPE 流量分载 (Offloading)
 uci set firewall.@defaults[0].flow_offloading='1'
 uci set firewall.@defaults[0].flow_offloading_hw='1'
 
@@ -486,7 +468,6 @@ for i in $(seq 0 10); do
 done
 uci commit firewall
 
-# 真正将 5GHz Wi-Fi 默认配置为 160MHz (HE160) 满血频宽并启用无线
 for r in radio0 radio1; do
     BAND=$(uci -q get wireless.$r.band)
     if [ "$BAND" = "5g" ]; then
@@ -509,7 +490,7 @@ exit 0
 EOF
 chmod +x package/base-files/files/etc/uci-defaults/99-f50-hotplug || true
 
-# 9. 部署 USB 动态热插拔规则（自带防御性初始化，首次变更设备时重载配置使 netifd 生效）
+# 9. 部署 USB 动态热插拔规则
 mkdir -p package/base-files/files/etc/hotplug.d/net || true
 cat << 'EOF' > package/base-files/files/etc/hotplug.d/net/99-f50-auto
 case "$ACTION" in
@@ -537,7 +518,7 @@ esac
 EOF
 chmod +x package/base-files/files/etc/hotplug.d/net/99-f50-auto || true
 
-# 10. 声明配置备份白名单（仅备份用户数据，绝不备份已固化在固件内的脚本以免覆盖新版本）
+# 10. 声明配置备份白名单
 mkdir -p package/base-files/files/etc || true
 cat << 'EOF' >> package/base-files/files/etc/sysupgrade.conf
 /etc/openclash/
@@ -558,7 +539,7 @@ exit 0
 EOF
 chmod +x package/base-files/files/etc/uci-defaults/99-timesync || true
 
-# 12. 部署 F50 自动保活看门狗脚本 (精准提取第 3 列默认网关 IP，兼顾单线与双线同插场景)
+# 12. 部署 F50 自动保活看门狗脚本
 cat << 'EOF' > package/base-files/files/usr/bin/f50-watchdog.sh
 #!/bin/sh
 
@@ -572,10 +553,8 @@ if ! ip link show "$DEV" 2>/dev/null | grep -q "UP"; then
     exit 0
 fi
 
-# 从默认路由中精准提取 via 后的网关 IP（第 3 列）
 GATEWAY_IP=$(ip route show default dev "$DEV" 2>/dev/null | awk '/via/ {print $3}' | head -n 1)
 
-# 若尚未拿到网关（如未插 SIM 卡或正在握手），不盲目折腾接口；拿到网关后先探活本地网关，再探活公网
 if [ -n "$GATEWAY_IP" ]; then
     if ! ping -c 2 -W 1 "$GATEWAY_IP" >/dev/null 2>&1; then
         logger -t "$LOG_TAG" "F50 ($DEV) 本地网关 $GATEWAY_IP 无响应，重新请求连接..."
@@ -592,7 +571,7 @@ exit 0
 EOF
 chmod +x package/base-files/files/usr/bin/f50-watchdog.sh || true
 
-# 13. 开机预置看门狗计划任务 (每 3 分钟自动执行一次)
+# 13. 开机预置看门狗计划任务
 cat << 'EOF' > package/base-files/files/etc/uci-defaults/99-f50-watchdog-cron
 CRON_JOB="*/3 * * * * /usr/bin/f50-watchdog.sh >/dev/null 2>&1"
 ( crontab -l 2>/dev/null | grep -v "f50-watchdog.sh"; echo "$CRON_JOB" ) | crontab -
@@ -603,15 +582,12 @@ EOF
 chmod +x package/base-files/files/etc/uci-defaults/99-f50-watchdog-cron || true
 
 # ==============================================================================
-# 14. 注入标准兼容版 CPE-MYOS 深度美化层 (登录直达看板 + 5秒无感实时刷新 + 全真硬件探针)
+# 14. 注入标准兼容版 CPE-MYOS 深度美化层 (无白框透明 SVG + 5秒实时刷新 + 防 FALLBACK)
 # ==============================================================================
 
 # 1. 编译期部署独立样式表 (兼容系统级深浅色与 Argon 手动深色切换)
 mkdir -p package/base-files/files/www/luci-static/resources || true
 cat << 'EOF' > package/base-files/files/www/luci-static/resources/cpe_myos_override.css
-/* ==========================================================================
-   1. 全局基础色调与卡片微调 (MYOS 风格)
-   ========================================================================== */
 :root {
     --cpe-bg-main: #f6f5f0;
     --cpe-bg-card: #ffffff;
@@ -631,13 +607,22 @@ cat << 'EOF' > package/base-files/files/www/luci-static/resources/cpe_myos_overr
     }
     body:not([data-theme="dark"]):not(.dark) .main-left,
     body:not([data-theme="dark"]):not(.dark) nav#mainmenu,
-    body:not([data-theme="dark"]):not(.dark) .navigation {
+    body:not([data-theme="dark"]):not(.dark) .navigation,
+    body:not([data-theme="dark"]):not(.dark) header {
         background-color: var(--cpe-bg-sidebar) !important;
         border-right: 1px solid var(--cpe-border) !important;
     }
 }
 
-/* Scoped 限定：仅美化外层卡片容器，绝不破坏内部表单排版 */
+/* 强制消除 SVG 画布与外层容器在任何主题下的背景白框 */
+svg.device-model-svg,
+.model-canvas svg,
+.model-canvas > div {
+    background: transparent !important;
+    box-shadow: none !important;
+    border: none !important;
+}
+
 .cbi-map > .cbi-section,
 #maincontent > .panel,
 #maincontent > .card {
@@ -659,9 +644,6 @@ cat << 'EOF' > package/base-files/files/www/luci-static/resources/cpe_myos_overr
     border-radius: var(--cpe-radius-md) !important;
 }
 
-/* ==========================================================================
-   2. 专属定制：MYOS 暖白香槟金 5G 动态呼吸登录页 (全兼容 Argon 25.x DOM)
-   ========================================================================== */
 @keyframes login-wave {
     0% { transform: translateX(-50%) scale(0.7); opacity: 0.8; }
     50% { opacity: 0.4; }
@@ -795,9 +777,6 @@ body.login .cbi-button-action {
     transition: all 0.25s ease !important;
 }
 
-/* ==========================================================================
-   2.5 系统级自适应深色模式与 Argon 手动暗色模式双兼容
-   ========================================================================== */
 @media (prefers-color-scheme: dark) {
     :root {
         --cpe-bg-main: #121316 !important;
@@ -807,9 +786,7 @@ body.login .cbi-button-action {
         --myos-text-primary: #F2F2F7 !important;
         --myos-text-secondary: #98989D !important;
     }
-    .myos-card {
-        color: #F2F2F7 !important;
-    }
+    .myos-card { color: #F2F2F7 !important; }
 }
 
 body[data-theme="dark"], body.dark {
@@ -838,43 +815,24 @@ html, body {
     -webkit-backdrop-filter: blur(20px) !important;
 }
 
-/* ==========================================================================
-   3. 移动端 (手机/竖屏平板) 响应式弹性自适应
-   ========================================================================== */
 @media (max-width: 768px) {
-    #maincontent {
-        padding: 12px 14px !important;
-    }
-    .myos-dashboard {
-        grid-template-columns: 1fr !important;
-        gap: 14px !important;
-    }
-    .model-canvas {
-        min-height: 330px !important;
-        padding: 16px !important;
-    }
-    .device-model-svg {
-        width: 100% !important;
-        max-width: 290px !important;
-        height: auto !important;
-    }
-    .wave-base {
-        width: 220px !important;
-        height: 70px !important;
-        bottom: 55px !important;
-    }
+    #maincontent { padding: 12px 14px !important; }
+    .myos-dashboard { grid-template-columns: 1fr !important; gap: 14px !important; }
+    .model-canvas { min-height: 350px !important; padding: 16px !important; }
+    .device-model-svg { width: 100% !important; max-width: 290px !important; height: auto !important; }
+    .wave-base { width: 220px !important; height: 70px !important; bottom: 55px !important; }
 }
 EOF
 
-# 2. 编译期物理固化 (将 @import 插入到第一行最顶端，严守 W3C 规范确保浏览器解析)
-for CSS_FILE in $(find package/ feeds/ -type f -name "cascade.css" 2>/dev/null | grep "argon"); do
+# 2. 编译期物理固化 (同时兼容 Argon 与 Bootstrap 样式表)
+for CSS_FILE in $(find package/ feeds/ -type f -name "cascade.css" 2>/dev/null | grep -E "argon|bootstrap"); do
     chmod +w "$CSS_FILE" 2>/dev/null || true
     if ! grep -Fq "cpe_myos_override.css" "$CSS_FILE"; then
         sed -i '1i@import url("/luci-static/resources/cpe_myos_override.css");' "$CSS_FILE"
     fi
 done
 
-# 3. 部署全真动态 + 5秒无感实时刷新版 CPE 聚合看板 (修复 BusyBox df -k 与 uci 匿名节读取)
+# 3. 部署全真动态 + 5秒无感实时刷新版 CPE 聚合看板 (无白框透明 SVG)
 mkdir -p package/base-files/files/www/luci-static/resources/view/status || true
 cat << 'EOF' > package/base-files/files/www/luci-static/resources/view/status/cpe_dashboard.js
 'use strict';
@@ -927,7 +885,6 @@ function parseDashboardData(data) {
 	var ifaceData = (data && typeof data[2] === 'object' && data[2] !== null && Array.isArray(data[2].interface)) ? data[2].interface : [];
 	var dfOut = (data && data[3] && typeof data[3].stdout === 'string') ? data[3].stdout : '';
 
-	// 1. 局域网在线客户端实时统计
 	var clientCount = 0;
 	if (Array.isArray(arpLines)) {
 		clientCount = arpLines.filter(function(line) {
@@ -937,7 +894,6 @@ function parseDashboardData(data) {
 		}).length;
 	}
 
-	// 2. F50 接口状态、物理网卡与 IP 实时判定
 	var f50Online = false;
 	var f50HasIP = false;
 	var activeDevice = '未就绪';
@@ -954,7 +910,6 @@ function parseDashboardData(data) {
 		}
 	}
 
-	// 3. 使用标准 uci.sections 读取防火墙 PPE 硬件加速状态与无线频宽
 	var realMtu = uci.get('network', 'f50', 'mtu') || '1420';
 	var fwDefs = uci.sections('firewall', 'defaults');
 	var hwOffload = (fwDefs.length > 0 && fwDefs[0].flow_offloading_hw === '1');
@@ -971,7 +926,6 @@ function parseDashboardData(data) {
 		}
 	}
 
-	// 4. 兼容 BusyBox df -k (1K-blocks) 实时换算 /overlay 剩余闪存空间
 	var overlayText = '读取中...';
 	if (dfOut) {
 		var dfLines = dfOut.trim().split('\n');
@@ -987,7 +941,6 @@ function parseDashboardData(data) {
 		}
 	}
 
-	// 5. 内存、CPU 负载与运行时长实时计算
 	var mem = info.memory || {};
 	var totalMem = Math.round((typeof mem.total === 'number' ? mem.total : 536870912) / 1048576);
 	var availMem = Math.round((typeof mem.available === 'number' ? mem.available : ((mem.free || 0) + (mem.buffered || 0) + (mem.cached || 0))) / 1048576);
@@ -1026,14 +979,13 @@ return view.extend({
 
 		var styleNode = E('style', {}, [
 			'@keyframes ripple-wave { 0% { transform: scale(0.8); opacity: 0.8; } 100% { transform: scale(1.4); opacity: 0; } }',
-			'@keyframes f50-pulse { 0%, 100% { filter: drop-shadow(0 0 4px #00e676); } 50% { filter: drop-shadow(0 0 10px #00e676); } }',
 			'@keyframes led-blink { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }',
 			'.myos-dashboard { display: grid; grid-template-columns: 1.35fr 1fr; gap: 20px; margin-bottom: 24px; }',
 			'.myos-card { background: var(--cpe-bg-card, #ffffff); color: var(--myos-text-primary, #1e1e1e); border-radius: 20px; border: 1px solid var(--cpe-border, #edeae2); box-shadow: 0 4px 20px rgba(0,0,0,0.025); padding: 24px; position: relative; }',
-			'.model-canvas { display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 400px; position: relative; overflow: hidden; }',
-			'.wave-base { position: absolute; width: 280px; height: 90px; border-radius: 50%; border: 2px solid ' + (st.f50Online ? 'rgba(41, 128, 185, 0.45)' : 'rgba(160, 160, 160, 0.3)') + '; bottom: 65px; z-index: 1; animation: ripple-wave 2.8s infinite cubic-bezier(0, 0.2, 0.8, 1); }',
+			'.model-canvas { display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 420px; padding-top: 56px; position: relative; overflow: hidden; }',
+			'.wave-base { position: absolute; width: 280px; height: 90px; border-radius: 50%; border: 2px solid ' + (st.f50Online ? 'rgba(41, 128, 185, 0.45)' : 'rgba(160, 160, 160, 0.3)') + '; bottom: 65px; z-index: 1; animation: ripple-wave 2.8s infinite cubic-bezier(0, 0.2, 0.8, 1); pointer-events: none; }',
 			'.wave-base-2 { animation-delay: 1.4s; }',
-			'.device-model-svg { z-index: 2; filter: drop-shadow(0 16px 24px rgba(27, 42, 74, 0.16)); transition: transform 0.3s ease; }',
+			'.device-model-svg { z-index: 2; background: transparent !important; box-shadow: none !important; border: none !important; transition: transform 0.3s ease; }',
 			'.device-model-svg:hover { transform: translateY(-3px); }',
 			'.stat-grid-right { display: flex; flex-direction: column; gap: 16px; }',
 			'.status-pill { display: inline-flex; align-items: center; padding: 4px 12px; border-radius: 20px; font-size: 12px; font-weight: 500; }',
@@ -1041,7 +993,7 @@ return view.extend({
 			'.pill-offline { background: #fdf2e9; color: #e67e22; }'
 		]);
 
-		var deviceSvg = '<svg class="device-model-svg" width="340" height="260" viewBox="0 0 340 260" fill="none" xmlns="http://www.w3.org/2000/svg">' +
+		var deviceSvg = '<svg class="device-model-svg" width="340" height="240" viewBox="0 0 340 240" fill="none" style="background:transparent!important;box-shadow:none!important;" xmlns="http://www.w3.org/2000/svg">' +
 			'<defs>' +
 				'<linearGradient id="trBlueBody" x1="0%" y1="0%" x2="0%" y2="100%">' +
 					'<stop offset="0%" stop-color="#2c4c7a" />' +
@@ -1059,36 +1011,37 @@ return view.extend({
 					'<stop offset="100%" stop-color="#E5E9F0" />' +
 				'</linearGradient>' +
 			'</defs>' +
-			'<ellipse cx="150" cy="226" rx="100" ry="14" fill="#D6DEE8" opacity="0.4" />' +
-			'<g transform="rotate(-18 68 180)">' +
-				'<rect x="62" y="55" width="12" height="130" rx="6" fill="url(#trAntenna)" stroke="#1a2e4c" stroke-width="1.2" />' +
-				'<circle cx="68" cy="180" r="8" fill="#1b2f4d" stroke="#34588c" stroke-width="1.5" />' +
+			'<ellipse cx="150" cy="216" rx="100" ry="12" fill="#D6DEE8" opacity="0.45" />' +
+			'<g transform="rotate(-18 68 170)">' +
+				'<rect x="62" y="45" width="12" height="130" rx="6" fill="url(#trAntenna)" stroke="#1a2e4c" stroke-width="1.2" />' +
+				'<circle cx="68" cy="170" r="8" fill="#1b2f4d" stroke="#34588c" stroke-width="1.5" />' +
 			'</g>' +
-			'<g transform="rotate(18 232 180)">' +
-				'<rect x="226" y="55" width="12" height="130" rx="6" fill="url(#trAntenna)" stroke="#1a2e4c" stroke-width="1.2" />' +
-				'<circle cx="232" cy="180" r="8" fill="#1b2f4d" stroke="#34588c" stroke-width="1.5" />' +
+			'<g transform="rotate(18 232 170)">' +
+				'<rect x="226" y="45" width="12" height="130" rx="6" fill="url(#trAntenna)" stroke="#1a2e4c" stroke-width="1.2" />' +
+				'<circle cx="232" cy="170" r="8" fill="#1b2f4d" stroke="#34588c" stroke-width="1.5" />' +
 			'</g>' +
-			'<rect x="75" y="150" width="150" height="68" rx="12" fill="url(#trBlueBody)" stroke="#1a2e4c" stroke-width="1.5" />' +
-			'<path d="M85 152 L215 152" stroke="#4872a8" stroke-width="2" stroke-linecap="round" opacity="0.65" />' +
-			'<text x="150" y="174" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="11" font-weight="700" fill="#E8EEF5" letter-spacing="1.2">cudy</text>' +
-			'<text x="150" y="185" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="7.5" font-weight="600" fill="#8CA4C4" letter-spacing="0.5">TR3000 • 512MB</text>' +
-			'<circle id="cpe_led_tr" cx="132" cy="202" r="2.5" fill="' + (st.f50Online ? '#00e676' : '#ffab00') + '" style="animation: led-blink 1.8s infinite;" />' +
-			'<circle id="cpe_led_wifi1" cx="144" cy="202" r="2.5" fill="' + (st.wifiUp ? '#00e676' : '#ff5252') + '" />' +
-			'<circle id="cpe_led_wifi2" cx="156" cy="202" r="2.5" fill="' + (st.wifiUp ? '#00e676' : '#ff5252') + '" />' +
-			'<circle cx="168" cy="202" r="2.5" fill="#00e676" />' +
-			'<path d="M225 188 C242 188, 245 160, 260 160" stroke="#7A8B9E" stroke-width="3" stroke-linecap="round" fill="none" />' +
-			'<g transform="translate(258, 126)">' +
-				'<rect x="0" y="0" width="46" height="66" rx="8" fill="url(#f50White)" stroke="#D0D7DE" stroke-width="1.5" filter="drop-shadow(0 6px 12px rgba(0,0,0,0.12))" />' +
+			'<rect x="75" y="140" width="150" height="68" rx="12" fill="url(#trBlueBody)" stroke="#1a2e4c" stroke-width="1.5" />' +
+			'<path d="M85 142 L215 142" stroke="#4872a8" stroke-width="2" stroke-linecap="round" opacity="0.65" />' +
+			'<text x="150" y="164" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="11" font-weight="700" fill="#E8EEF5" letter-spacing="1.2">cudy</text>' +
+			'<text x="150" y="175" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="7.5" font-weight="600" fill="#8CA4C4" letter-spacing="0.5">TR3000 • 512MB</text>' +
+			'<circle id="cpe_led_tr" cx="132" cy="192" r="2.5" fill="' + (st.f50Online ? '#00e676' : '#ffab00') + '" style="animation: led-blink 1.8s infinite;" />' +
+			'<circle id="cpe_led_wifi1" cx="144" cy="192" r="2.5" fill="' + (st.wifiUp ? '#00e676' : '#ff5252') + '" />' +
+			'<circle id="cpe_led_wifi2" cx="156" cy="192" r="2.5" fill="' + (st.wifiUp ? '#00e676' : '#ff5252') + '" />' +
+			'<circle cx="168" cy="192" r="2.5" fill="#00e676" />' +
+			'<path d="M225 178 C242 178, 245 150, 260 150" stroke="#7A8B9E" stroke-width="3" stroke-linecap="round" fill="none" />' +
+			'<g transform="translate(258, 116)">' +
+				'<rect x="2" y="4" width="46" height="66" rx="8" fill="#182d49" opacity="0.12" />' +
+				'<rect x="0" y="0" width="46" height="66" rx="8" fill="url(#f50White)" stroke="#D0D7DE" stroke-width="1.5" />' +
 				'<text x="23" y="20" text-anchor="middle" font-family="-apple-system, sans-serif" font-size="7.5" font-weight="800" fill="#2E3A4B">ZTE</text>' +
 				'<text x="23" y="34" text-anchor="middle" font-family="-apple-system, sans-serif" font-size="9" font-weight="900" fill="#C9933E" letter-spacing="0.5">5G+</text>' +
 				'<text x="23" y="44" text-anchor="middle" font-family="-apple-system, sans-serif" font-size="6" font-weight="600" fill="#8892A0">F50 Portable</text>' +
-				'<circle id="cpe_led_f50_1" cx="17" cy="54" r="2" fill="' + (st.f50Online ? '#00e676' : '#ff5252') + '" style="' + (st.f50Online ? 'animation: f50-pulse 1.5s infinite;' : '') + '" />' +
+				'<circle id="cpe_led_f50_1" cx="17" cy="54" r="2" fill="' + (st.f50Online ? '#00e676' : '#ff5252') + '" style="animation: led-blink 1.5s infinite;" />' +
 				'<circle id="cpe_led_f50_2" cx="29" cy="54" r="2" fill="' + (st.f50Online ? '#00e676' : '#999') + '" />' +
 			'</g>' +
 		'</svg>';
 
 		var modelWrapper = E('div', { 'class': 'myos-card model-canvas' }, [
-			E('div', { 'style': 'position: absolute; top: 22px; left: 24px; text-align: left;' }, [
+			E('div', { 'style': 'position: absolute; top: 22px; left: 24px; text-align: left; z-index: 5;' }, [
 				E('div', { 'id': 'cpe_title_status', 'style': 'font-size: 20px; font-weight: 700; margin-bottom: 4px;' }, 
 					(st.f50Online && st.f50HasIP) ? '蜂窝 5G 聚合网络已连接' : '蜂窝网络重连中 / 未就绪'),
 				E('div', { 'style': 'font-size: 13px; opacity: 0.75;' }, 'Cudy TR3000 (哑光蓝双天线) + 中兴 F50 5G 便携联动')
@@ -1096,11 +1049,11 @@ return view.extend({
 			E('div', { 'id': 'cpe_wave_1', 'class': 'wave-base' }),
 			E('div', { 'id': 'cpe_wave_2', 'class': 'wave-base wave-base-2' }),
 			(function() {
-				var div = E('div', { 'style': 'position: relative; z-index: 2;' });
+				var div = E('div', { 'style': 'position: relative; z-index: 2; background: transparent !important;' });
 				div.innerHTML = deviceSvg;
 				return div;
 			})(),
-			E('div', { 'style': 'margin-top: 12px; z-index: 3;' }, [
+			E('div', { 'style': 'margin-top: 8px; z-index: 3; background: transparent !important;' }, [
 				E('span', { 'id': 'cpe_pill_box', 'class': 'status-pill ' + (st.f50Online ? 'pill-online' : 'pill-offline') }, [
 					E('span', { 'id': 'cpe_pill_dot', 'style': 'margin-right: 6px; font-size: 14px;' }, st.f50Online ? '●' : '○'),
 					E('span', { 'id': 'cpe_pill_text' }, st.f50Online ? ('5G 全双工透传 • MTU ' + st.realMtu + ' 优化') : 'F50 等待握手或看门狗介入')
@@ -1161,7 +1114,6 @@ return view.extend({
 			])
 		]);
 
-		// 注册 5 秒无感定时轮询：局部刷新全部卡片数据与 SVG 状态指示灯
 		poll.add(function() {
 			return fetchDashboardData().then(function(newData) {
 				var s = parseDashboardData(newData);
@@ -1271,14 +1223,19 @@ cat << 'EOF' > package/base-files/files/usr/share/rpcd/acl.d/luci-app-cpe-overvi
 }
 EOF
 
-# 5. 开机预置：锁定 Argon 主题与香槟金主色 + 默认开启 MTK PPE 硬件加速与 5G 160MHz + 刷新缓存
+# 5. 开机预置：安全激活 Argon 主题(防 FALLBACK) + 锁定中文 + 开启 MTK PPE 硬件加速与 5G 160MHz
 mkdir -p package/base-files/files/etc/uci-defaults || true
 cat << 'EOF' > package/base-files/files/etc/uci-defaults/99-cpe-theme-init
-# 强制锁定默认主题为 Argon
-uci set luci.main.mediaurlbase='/luci-static/argon'
+uci set luci.main.lang='zh_cn'
+
+if [ -d "/www/luci-static/argon" ]; then
+    uci set luci.themes.Argon='/luci-static/argon'
+    uci set luci.main.mediaurlbase='/luci-static/argon'
+else
+    uci set luci.main.mediaurlbase='/luci-static/bootstrap'
+fi
 uci commit luci
 
-# 同步配置 Argon 默认主色调为 MYOS 香槟金 (#c9933e)
 if uci -q get argon.@global[0] >/dev/null; then
     uci set argon.@global[0].primary='#c9933e'
     uci set argon.@global[0].dark_primary='#c9933e'
@@ -1286,12 +1243,10 @@ if uci -q get argon.@global[0] >/dev/null; then
     uci commit argon
 fi
 
-# 默认激活 firewall4 的软件与 MTK 硬件 PPE 流量分载 (Offloading)
 uci set firewall.@defaults[0].flow_offloading='1'
 uci set firewall.@defaults[0].flow_offloading_hw='1'
 uci commit firewall
 
-# 默认将 5GHz Wi-Fi 配置为 160MHz (HE160) 满血频宽并开启双频无线
 for r in radio0 radio1; do
     BAND=$(uci -q get wireless.$r.band)
     if [ "$BAND" = "5g" ]; then
@@ -1306,14 +1261,11 @@ for r in radio0 radio1; do
 done
 uci commit wireless
 
-ARGON_CSS="/www/luci-static/argon/css/cascade.css"
-IMPORT_RULE='@import url("/luci-static/resources/cpe_myos_override.css");'
-
-if [ -f "$ARGON_CSS" ]; then
-    if ! grep -Fq "cpe_myos_override.css" "$ARGON_CSS"; then
-        echo "$IMPORT_RULE" | cat - "$ARGON_CSS" > /tmp/cascade.tmp && mv /tmp/cascade.tmp "$ARGON_CSS"
+for CSS_TARGET in /www/luci-static/argon/css/cascade.css /www/luci-static/bootstrap/cascade.css; do
+    if [ -f "$CSS_TARGET" ] && ! grep -Fq "cpe_myos_override.css" "$CSS_TARGET"; then
+        echo '@import url("/luci-static/resources/cpe_myos_override.css");' | cat - "$CSS_TARGET" > /tmp/cascade.tmp && mv /tmp/cascade.tmp "$CSS_TARGET"
     fi
-fi
+done
 
 /etc/init.d/rpcd restart 2>/dev/null || true
 rm -rf /tmp/luci-indexcache /tmp/luci-modulecache/ 2>/dev/null || true
@@ -1322,15 +1274,37 @@ EOF
 chmod +x package/base-files/files/etc/uci-defaults/99-cpe-theme-init || true
 
 # ==============================================================================
-# 15. 预置底层网络与内核模块依赖 (支持 OpenBox / 透明代理 / 虚拟网卡 / F50 模式切换)
+# 15. 强制兜底锁死 Argon 主题、中文包及核心功能模块 (防 .config 路径遗漏)
 # ==============================================================================
 cat << 'EOF' >> .config
+CONFIG_PACKAGE_luci=y
+CONFIG_PACKAGE_luci-base=y
+CONFIG_PACKAGE_luci-compat=y
+CONFIG_PACKAGE_luci-i18n-base-zh-cn=y
+CONFIG_PACKAGE_luci-theme-argon=y
+CONFIG_PACKAGE_luci-app-argon-config=y
+CONFIG_PACKAGE_luci-i18n-argon-config-zh-cn=y
+CONFIG_PACKAGE_luci-app-turboacc=y
+CONFIG_PACKAGE_luci-i18n-turboacc-zh-cn=y
+CONFIG_PACKAGE_TURBOACC_INCLUDE_OFFLOADING=y
+CONFIG_PACKAGE_luci-app-ttyd=y
+CONFIG_PACKAGE_luci-i18n-ttyd-zh-cn=y
+CONFIG_PACKAGE_luci-app-diskman=y
+CONFIG_PACKAGE_luci-i18n-diskman-zh-cn=y
+CONFIG_PACKAGE_kmod-usb-net=y
+CONFIG_PACKAGE_kmod-usb-net-rndis=y
+CONFIG_PACKAGE_kmod-usb-net-cdc-ether=y
+CONFIG_PACKAGE_kmod-usb-net-cdc-ncm=y
 CONFIG_PACKAGE_kmod-tun=y
+CONFIG_PACKAGE_kmod-nft-tproxy=y
+CONFIG_PACKAGE_kmod-nft-socket=y
 CONFIG_PACKAGE_kmod-nft-queue=y
 CONFIG_PACKAGE_kmod-nft-nat=y
 CONFIG_PACKAGE_kmod-veth=y
 CONFIG_PACKAGE_ip-full=y
 CONFIG_PACKAGE_ca-bundle=y
+CONFIG_PACKAGE_curl=y
+CONFIG_PACKAGE_jq=y
 CONFIG_PACKAGE_usb-modeswitch=y
 EOF
 
