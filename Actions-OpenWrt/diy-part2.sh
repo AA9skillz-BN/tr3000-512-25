@@ -476,10 +476,15 @@ EOF
 chmod +x package/base-files/files/usr/bin/f50-watchdog.sh || true
 
 # ==============================================================================
-# 9. 预置 OpenClash 最新 ARM64 Meta (Mihomo) 内核与规则数据库
+# 9. 预置 OpenClash 最新 ARM64 Meta (Mihomo) 内核 (直接注入插件源码目录防冲突)
 # ==============================================================================
-CORE_DIR="package/base-files/files/etc/openclash/core"
-ETC_OC_DIR="package/base-files/files/etc/openclash"
+echo "正在为 Cudy TR3000 (aarch64) 下载并内置 OpenClash Meta (Mihomo) 内核..."
+# 优先直接放入 OpenClash 软件包自身目录，避免与 base-files 产生文件归属权冲突
+OC_ROOT="package/luci-app-openclash/root/etc/openclash"
+if [ ! -d "$OC_ROOT" ]; then
+    OC_ROOT="package/base-files/files/etc/openclash"
+fi
+CORE_DIR="$OC_ROOT/core"
 mkdir -p "$CORE_DIR"
 
 META_URL="https://raw.githubusercontent.com/vernesong/OpenClash/core/master/meta/clash-linux-arm64.tar.gz"
@@ -489,12 +494,13 @@ if curl -sL --connect-timeout 15 --retry 3 "$META_URL" -o /tmp/clash_meta.tar.gz
     cp -f "$CORE_DIR/clash_meta" "$CORE_DIR/clash" 2>/dev/null || true
     chmod 0755 "$CORE_DIR/clash_meta" "$CORE_DIR/clash" 2>/dev/null || true
     rm -f /tmp/clash_meta.tar.gz
-    echo "✔ OpenClash Meta 内核预置成功！"
+    echo "✔ OpenClash Meta (clash_meta) 内核预置成功！"
 fi
 
-curl -sL --connect-timeout 15 --retry 2 "https://raw.githubusercontent.com/alecthw/mmdb_china_ip_list/release/lite/Country.mmdb" -o "$ETC_OC_DIR/Country.mmdb" || true
-curl -sL --connect-timeout 15 --retry 2 "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geosite.dat" -o "$ETC_OC_DIR/GeoSite.dat" || true
-curl -sL --connect-timeout 15 --retry 2 "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geoip.dat" -o "$ETC_OC_DIR/GeoIP.dat" || true
+# 直接更新 OpenClash 源码包自带的 GeoIP / GeoSite 文件（归属权仍属于 luci-app-openclash，绝不冲突）
+curl -sL --connect-timeout 15 --retry 2 "https://raw.githubusercontent.com/alecthw/mmdb_china_ip_list/release/lite/Country.mmdb" -o "$OC_ROOT/Country.mmdb" || true
+curl -sL --connect-timeout 15 --retry 2 "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geosite.dat" -o "$OC_ROOT/GeoSite.dat" || true
+curl -sL --connect-timeout 15 --retry 2 "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geoip.dat" -o "$OC_ROOT/GeoIP.dat" || true
 
 mkdir -p package/base-files/files/etc || true
 grep -qxF '/etc/openclash/' package/base-files/files/etc/sysupgrade.conf 2>/dev/null || echo '/etc/openclash/' >> package/base-files/files/etc/sysupgrade.conf
