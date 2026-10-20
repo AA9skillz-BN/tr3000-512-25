@@ -415,19 +415,9 @@ return view.extend({
 });
 EOF
 
-# 8. 预置中兴 F50 免驱支持、MTU 1420 及防限速 TTL/HL=65 精准锁定
-mkdir -p package/base-files/files/etc/uci-defaults || true
-
-cat << 'EOF' > package/base-files/files/etc/firewall.ttl
-#!/bin/sh
-nft add table inet fw4 2>/dev/null
-nft add chain inet fw4 f50_ttl '{ type filter hook postrouting priority 300; policy accept; }' 2>/dev/null
-nft flush chain inet fw4 f50_ttl 2>/dev/null
-nft add rule inet fw4 f50_ttl oifname '{ "eth2", "usb0" }' ip ttl set 65 2>/dev/null
-nft add rule inet fw4 f50_ttl oifname '{ "eth2", "usb0" }' ip6 hoplimit set 65 2>/dev/null
-EOF
-chmod +x package/base-files/files/etc/firewall.ttl || true
-
+# ==============================================================================
+# 8. 部署 F50 防限速 TTL=65 (原生 fw4 挂载) 与 USB 热插拔自愈看门狗
+# ==============================================================================
 mkdir -p package/base-files/files/usr/share/nftables.d/table-post || true
 cat << 'EOF' > package/base-files/files/usr/share/nftables.d/table-post/99-f50-ttl.nft
 chain f50_ttl {
@@ -437,73 +427,6 @@ chain f50_ttl {
 }
 EOF
 
-cat << 'EOF' > package/base-files/files/etc/uci-defaults/99-f50-hotplug
-uci set network.f50=interface
-uci set network.f50.proto='dhcp'
-uci set network.f50.metric='20'
-uci set network.f50.mtu='1420'
-
-DEV=""
-if [ -d "/sys/class/net/usb0" ]; then
-    DEV="usb0"
-elif [ -d "/sys/class/net/eth2" ]; then
-    DEV="eth2"
-fi
-
-if [ -n "$DEV" ]; then
-    uci set network.f50.device="$DEV"
-fi
-uci commit network
-
-uci set firewall.@defaults[0].flow_offloading='1'
-uci set firewall.@defaults[0].flow_offloading_hw='1'
-
-for i in $(seq 0 10); do
-    ZNAME=$(uci -q get firewall.@zone[$i].name)
-    if [ "$ZNAME" = "wan" ]; then
-        uci del_list firewall.@zone[$i].network='f50' 2>/dev/null
-        uci add_list firewall.@zone[$i].network='f50'
-        break
-    fi
-done
-uci commit firewall
-
-# 深度优化 MT7981B 双频 Wi-Fi 6 (满血 160MHz + 强制 40MHz 抗干扰 + 波束成形)
-for r in radio0 radio1; do
-    BAND=$(uci -q get wireless.$r.band)
-    # 清除可能导致 hostapd 锁死的国家码限制，开启硬件波束成形
-    uci -q delete wireless.$r.country
-    uci set wireless.$r.cell_density='0'
-    uci set wireless.$r.mu_beamformer='1'
-    uci set wireless.$r.disabled='0'
-
-    if [ "$BAND" = "5g" ]; then
-        uci set wireless.$r.channel='36'
-        uci set wireless.$r.htmode='HE160'
-        # 配置默认 5G SSID 名称与弱信号防踢保护
-        uci set wireless.default_$r.ssid='Cudy-TR3000-5G'
-        uci set wireless.default_$r.disassoc_low_ack='0'
-        uci set wireless.default_$r.wpa_disable_eapol_key_retries='1'
-    elif [ "$BAND" = "2g" ]; then
-        uci set wireless.$r.channel='6'
-        uci set wireless.$r.htmode='HE40'
-        uci set wireless.$r.noscan='1'
-        # 配置默认 2.4G SSID 名称与弱信号防踢保护
-        uci set wireless.default_$r.ssid='Cudy-TR3000-2.4G'
-        uci set wireless.default_$r.disassoc_low_ack='0'
-    fi
-done
-uci commit wireless
-
-/etc/init.d/mwan3 disable 2>/dev/null || true
-/etc/init.d/mwan3 stop 2>/dev/null || true
-
-/etc/firewall.ttl 2>/dev/null || true
-exit 0
-EOF
-chmod +x package/base-files/files/etc/uci-defaults/99-f50-hotplug || true
-
-# 9. 部署 USB 动态热插拔规则
 mkdir -p package/base-files/files/etc/hotplug.d/net || true
 cat << 'EOF' > package/base-files/files/etc/hotplug.d/net/99-f50-auto
 case "$ACTION" in
@@ -515,15 +438,12 @@ case "$ACTION" in
                 uci set network.f50.metric='20'
                 uci set network.f50.mtu='1420'
             fi
-
             CURRENT_DEV=$(uci -q get network.f50.device)
             if [ "$CURRENT_DEV" != "$INTERFACE" ]; then
                 uci set network.f50.device="$INTERFACE"
                 uci commit network
                 /etc/init.d/network reload
             fi
-
-            /etc/firewall.ttl 2>/dev/null || true
             ( sleep 2 && ifup f50 ) >/dev/null 2>&1 &
         fi
         ;;
@@ -531,112 +451,120 @@ esac
 EOF
 chmod +x package/base-files/files/etc/hotplug.d/net/99-f50-auto || true
 
-# 10. 声明配置备份白名单
-mkdir -p package/base-files/files/etc || true
-cat << 'EOF' >> package/base-files/files/etc/sysupgrade.conf
-/etc/openclash/
-EOF
-
-# 11. 系统时区与高可用国内 NTP 校准
-mkdir -p package/base-files/files/etc/uci-defaults || true
-cat << 'EOF' > package/base-files/files/etc/uci-defaults/99-timesync
-uci set system.@system[0].zonename='Asia/Shanghai'
-uci set system.@system[0].timezone='CST-8'
-uci -q delete system.ntp.server
-uci add_list system.ntp.server='ntp.aliyun.com'
-uci add_list system.ntp.server='time1.cloud.tencent.com'
-uci add_list system.ntp.server='cn.pool.ntp.org'
-uci add_list system.ntp.server='pool.ntp.org'
-uci commit system
-exit 0
-EOF
-chmod +x package/base-files/files/etc/uci-defaults/99-timesync || true
-
-# 12. 部署 F50 自动保活看门狗脚本
 cat << 'EOF' > package/base-files/files/usr/bin/f50-watchdog.sh
 #!/bin/sh
-
 TARGET_IP="223.5.5.5"
 LOG_TAG="F50-Watchdog"
-
 DEV=$(uci -q get network.f50.device)
 [ -z "$DEV" ] && exit 0
-
-if ! ip link show "$DEV" 2>/dev/null | grep -q "UP"; then
-    exit 0
-fi
+ip link show "$DEV" 2>/dev/null | grep -q "UP" || exit 0
 
 GATEWAY_IP=$(ip route show default dev "$DEV" 2>/dev/null | awk '/via/ {print $3}' | head -n 1)
-
 if [ -n "$GATEWAY_IP" ]; then
     if ! ping -c 2 -W 1 "$GATEWAY_IP" >/dev/null 2>&1; then
-        logger -t "$LOG_TAG" "F50 ($DEV) 本地网关 $GATEWAY_IP 无响应，重新请求连接..."
+        logger -t "$LOG_TAG" "F50 ($DEV) 网关 $GATEWAY_IP 无响应，重连中..."
         ifup f50
         exit 0
     fi
 fi
-
 if ! ping -c 3 -W 2 -I "$DEV" "$TARGET_IP" >/dev/null 2>&1; then
-    logger -t "$LOG_TAG" "检测到 F50 ($DEV) 蜂窝数据失联，正在重新请求 DHCP 租约..."
+    logger -t "$LOG_TAG" "检测到 F50 ($DEV) 蜂窝失联，重新请求租约..."
     ifup f50
 fi
 exit 0
 EOF
 chmod +x package/base-files/files/usr/bin/f50-watchdog.sh || true
 
-# 13. 开机预置看门狗计划任务
-cat << 'EOF' > package/base-files/files/etc/uci-defaults/99-f50-watchdog-cron
-CRON_JOB="*/3 * * * * /usr/bin/f50-watchdog.sh >/dev/null 2>&1"
-( crontab -l 2>/dev/null | grep -v "f50-watchdog.sh"; echo "$CRON_JOB" ) | crontab -
-/etc/init.d/cron enable
-/etc/init.d/cron restart
-exit 0
-EOF
-chmod +x package/base-files/files/etc/uci-defaults/99-f50-watchdog-cron || true
-
 # ==============================================================================
-# 14. 预置 OpenClash 最新 ARM64 Meta (Mihomo) 内核与 GeoIP/GeoSite 规则数据库
+# 9. 预置 OpenClash 最新 ARM64 Meta (Mihomo) 内核与规则数据库
 # ==============================================================================
-echo "正在为 Cudy TR3000 (aarch64) 下载并内置 OpenClash Meta (Mihomo) 内核..."
 CORE_DIR="package/base-files/files/etc/openclash/core"
 ETC_OC_DIR="package/base-files/files/etc/openclash"
 mkdir -p "$CORE_DIR"
 
-# 拉取 Vernesong 官方维护的 ARM64 Meta 内核
 META_URL="https://raw.githubusercontent.com/vernesong/OpenClash/core/master/meta/clash-linux-arm64.tar.gz"
 if curl -sL --connect-timeout 15 --retry 3 "$META_URL" -o /tmp/clash_meta.tar.gz; then
     tar -zxf /tmp/clash_meta.tar.gz -C "$CORE_DIR"
     mv -f "$CORE_DIR/clash" "$CORE_DIR/clash_meta" 2>/dev/null || true
-    # 同时复制一份为 clash 以兼容旧版调用设置
     cp -f "$CORE_DIR/clash_meta" "$CORE_DIR/clash" 2>/dev/null || true
     chmod 0755 "$CORE_DIR/clash_meta" "$CORE_DIR/clash" 2>/dev/null || true
     rm -f /tmp/clash_meta.tar.gz
-    echo "✔ OpenClash Meta (clash_meta) 内核预置成功！"
-else
-    echo "⚠ 警告: OpenClash Meta 内核下载超时，可在开机后于插件内点击更新内核。"
+    echo "✔ OpenClash Meta 内核预置成功！"
 fi
 
-# 预置 GeoIP (Country.mmdb) 与 GeoSite 数据库，避免开机首次启动卡下载
 curl -sL --connect-timeout 15 --retry 2 "https://raw.githubusercontent.com/alecthw/mmdb_china_ip_list/release/lite/Country.mmdb" -o "$ETC_OC_DIR/Country.mmdb" || true
 curl -sL --connect-timeout 15 --retry 2 "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geosite.dat" -o "$ETC_OC_DIR/GeoSite.dat" || true
 curl -sL --connect-timeout 15 --retry 2 "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geoip.dat" -o "$ETC_OC_DIR/GeoIP.dat" || true
 
+mkdir -p package/base-files/files/etc || true
+grep -qxF '/etc/openclash/' package/base-files/files/etc/sysupgrade.conf 2>/dev/null || echo '/etc/openclash/' >> package/base-files/files/etc/sysupgrade.conf
+
 # ==============================================================================
-# 15. 纯净预置 Aurora 主题与 OpenClash 默认启用 Meta 内核 (防 THEME FALLBACK)
+# 10. 统一开机初始化脚本 (合并主题、时区、PPE加速、满血Wi-Fi、F50与OpenClash)
 # ==============================================================================
 mkdir -p package/base-files/files/etc/uci-defaults || true
-cat << 'EOF' > package/base-files/files/etc/uci-defaults/99-aurora-and-oc-init
-# 1. 强制锁定简体中文
+cat << 'EOF' > package/base-files/files/etc/uci-defaults/99-custom-init
+# 1. 语言与 Aurora 主题安全激活
 uci set luci.main.lang='zh_cn'
-
-# 2. 安全注册并激活 Aurora 主题 (防止 LuCI 25.x 报 THEME FALLBACK)
 if [ -d "/www/luci-static/aurora" ]; then
     uci set luci.themes.Aurora='/luci-static/aurora'
     uci set luci.main.mediaurlbase='/luci-static/aurora'
 fi
 uci commit luci
 
-# 3. 确保 OpenClash 默认指向已内置的 Meta 内核并修复权限
+# 2. 系统时区与国内高可用 NTP
+uci set system.@system[0].zonename='Asia/Shanghai'
+uci set system.@system[0].timezone='CST-8'
+uci -q delete system.ntp.server
+uci add_list system.ntp.server='ntp.aliyun.com'
+uci add_list system.ntp.server='time1.cloud.tencent.com'
+uci add_list system.ntp.server='cn.pool.ntp.org'
+uci commit system
+
+# 3. F50 接口与 MTK PPE 硬件加速
+uci set network.f50=interface
+uci set network.f50.proto='dhcp'
+uci set network.f50.metric='20'
+uci set network.f50.mtu='1420'
+if [ -d "/sys/class/net/usb0" ]; then
+    uci set network.f50.device='usb0'
+elif [ -d "/sys/class/net/eth2" ]; then
+    uci set network.f50.device='eth2'
+fi
+uci commit network
+
+uci set firewall.@defaults[0].flow_offloading='1'
+uci set firewall.@defaults[0].flow_offloading_hw='1'
+for i in $(seq 0 10); do
+    if [ "$(uci -q get firewall.@zone[$i].name)" = "wan" ]; then
+        uci del_list firewall.@zone[$i].network='f50' 2>/dev/null
+        uci add_list firewall.@zone[$i].network='f50'
+        break
+    fi
+done
+uci commit firewall
+
+# 4. 满血 MT7981B Wi-Fi 6 优化 (无锁死隐患 + 波束成形 + 黄金信道)
+for r in radio0 radio1; do
+    BAND=$(uci -q get wireless.$r.band)
+    uci -q delete wireless.$r.country
+    uci set wireless.$r.cell_density='0'
+    uci set wireless.$r.mu_beamformer='1'
+    uci set wireless.$r.disabled='0'
+    if [ "$BAND" = "5g" ]; then
+        uci set wireless.$r.channel='36'
+        uci set wireless.$r.htmode='HE160'
+        uci set wireless.default_$r.disassoc_low_ack='0'
+    elif [ "$BAND" = "2g" ]; then
+        uci set wireless.$r.channel='6'
+        uci set wireless.$r.htmode='HE40'
+        uci set wireless.$r.noscan='1'
+        uci set wireless.default_$r.disassoc_low_ack='0'
+    fi
+done
+uci commit wireless
+
+# 5. OpenClash 默认锁定内置 Meta 内核
 if [ -f "/etc/config/openclash" ]; then
     uci set openclash.config.core_version='linux-arm64'
     uci set openclash.config.enable_meta_core='1'
@@ -644,14 +572,20 @@ if [ -f "/etc/config/openclash" ]; then
 fi
 chmod 0755 /etc/openclash/core/clash* 2>/dev/null || true
 
+# 6. 注册 F50 3分钟保活计划任务
+CRON_JOB="*/3 * * * * /usr/bin/f50-watchdog.sh >/dev/null 2>&1"
+( crontab -l 2>/dev/null | grep -v "f50-watchdog.sh"; echo "$CRON_JOB" ) | crontab -
+/etc/init.d/cron enable
+/etc/init.d/cron restart
+
 /etc/init.d/rpcd restart 2>/dev/null || true
 rm -rf /tmp/luci-indexcache /tmp/luci-modulecache/ 2>/dev/null || true
 exit 0
 EOF
-chmod +x package/base-files/files/etc/uci-defaults/99-aurora-and-oc-init || true
+chmod +x package/base-files/files/etc/uci-defaults/99-custom-init || true
 
 # ==============================================================================
-# 16. 强制兜底锁死 Aurora 主题、OpenClash 本体及核心依赖
+# 11. 强制兜底锁死核心配置包
 # ==============================================================================
 sed -i '/luci-theme-argon/d' .config 2>/dev/null || true
 sed -i '/luci-app-argon-config/d' .config 2>/dev/null || true
@@ -674,8 +608,6 @@ CONFIG_PACKAGE_luci-i18n-turboacc-zh-cn=y
 CONFIG_PACKAGE_TURBOACC_INCLUDE_OFFLOADING=y
 CONFIG_PACKAGE_luci-app-ttyd=y
 CONFIG_PACKAGE_luci-i18n-ttyd-zh-cn=y
-CONFIG_PACKAGE_luci-app-diskman=y
-CONFIG_PACKAGE_luci-i18n-diskman-zh-cn=y
 CONFIG_PACKAGE_kmod-usb-net=y
 CONFIG_PACKAGE_kmod-usb-net-rndis=y
 CONFIG_PACKAGE_kmod-usb-net-cdc-ether=y
@@ -684,9 +616,7 @@ CONFIG_PACKAGE_kmod-tun=y
 CONFIG_PACKAGE_kmod-inet-diag=y
 CONFIG_PACKAGE_kmod-nft-tproxy=y
 CONFIG_PACKAGE_kmod-nft-socket=y
-CONFIG_PACKAGE_kmod-nft-queue=y
 CONFIG_PACKAGE_kmod-nft-nat=y
-CONFIG_PACKAGE_kmod-veth=y
 CONFIG_PACKAGE_ip-full=y
 CONFIG_PACKAGE_ca-bundle=y
 CONFIG_PACKAGE_curl=y
