@@ -10,7 +10,7 @@ die() { echo "❌ [diy-part1] $*" >&2; exit 1; }
 
 [ -f feeds.conf.default ] || die "feeds.conf.default 不存在，当前目录不是 OpenWrt 源码根目录"
 
-# 1. 添加 VIKINGYFY 专属软件包源（包含 PPE 加速及优化插件）
+# 1. 添加 VIKINGYFY 专属软件包源（补齐官方 feed 里没有的包）
 if ! grep -q "viking_packages" feeds.conf.default; then
     echo "src-git viking_packages https://github.com/VIKINGYFY/packages.git" >> feeds.conf.default
     echo "✔ 已添加 viking_packages feed"
@@ -20,14 +20,9 @@ fi
 clone_pkg() {
     local url="$1"
     local dir="$2"
-    local branch="${3:-}"
 
     rm -rf "$dir"
-    if [ -n "$branch" ]; then
-        git clone --depth=1 --branch "$branch" "$url" "$dir" || die "clone 失败: $url ($branch)"
-    else
-        git clone --depth=1 "$url" "$dir" || die "clone 失败: $url"
-    fi
+    git clone --depth=1 "$url" "$dir" || die "clone 失败: $url"
     [ -f "$dir/Makefile" ] || die "$dir 下没有 Makefile，仓库结构可能已变化"
 }
 
