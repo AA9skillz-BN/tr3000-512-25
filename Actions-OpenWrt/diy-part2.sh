@@ -564,10 +564,6 @@ else
     uci set firewall.@defaults[0].flow_offloading='0'
     uci set firewall.@defaults[0].flow_offloading_hw='0'
 fi
-if [ -f "/etc/config/turboacc" ]; then
-    uci set turboacc.config.bbr_cca='1'
-    uci commit turboacc
-fi
 
 # 3. F50 接口：优先选真正挂在 USB 总线上的网卡，找不到先用 usb0（之后由 hotplug 修正）
 uci set network.f50=interface
@@ -644,9 +640,8 @@ exit 0
 EOF
 chmod +x package/base-files/files/etc/uci-defaults/99-custom-init
 
-# 说明：中文语言包不在这里做路径探测（feeds 的安装布局因版本而异，探测容易误杀）。
-# .config 里把 -zh-cn / -zh_Hans 两种包名都列上，由 make defconfig 自己挑出真实存在
-# 的那个、丢掉另一个；真正的校验放在 workflow 的 defconfig 之后，并带诊断输出。
+# 说明：中文语言包不在构建期做路径探测（feeds 的安装布局因版本而异，探测容易误杀）。
+# .config 里统一用 -zh-cn；真正的校验放在 workflow 的 defconfig 之后，缺了就报错并带诊断输出。
 
 # ==============================================================================
 # 8. 产物自检：任何一项缺失都让构建直接失败
