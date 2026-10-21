@@ -133,6 +133,9 @@ jobs:
         EXTRA_CFG: ${{ github.event.inputs.extra_config }}
 
     - name: Defconfig and Download packages
+      # 下载偶尔会因为某个包的镜像挂掉而无限重试（实测卡过 69 分钟），
+      # 给这一步加硬上限，卡住就快速失败，重跑换 runner 通常就好。
+      timeout-minutes: 60
       run: |
         cd openwrt
         DEVICE_CONFIG='CONFIG_TARGET_mediatek_filogic_DEVICE_cudy_tr3000-512mb-v1'
