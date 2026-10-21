@@ -121,23 +121,27 @@ cat << 'EOF' > package/base-files/files/usr/share/luci/menu.d/luci-app-autoupdat
 EOF
 
 # ==============================================================================
-# 5. 部署 F50 防限速 TTL=65 与 USB 热插拔自愈看门狗
+# 5. 部署 F50 防限速 TTL=65 (覆盖 eth1/eth2/usb0) 与 USB 总线智能热插拔
 # ==============================================================================
 mkdir -p package/base-files/files/usr/share/nftables.d/table-post package/base-files/files/etc/hotplug.d/net || true
 cat << 'EOF' > package/base-files/files/usr/share/nftables.d/table-post/99-f50-ttl.nft
 chain f50_ttl {
     type filter hook postrouting priority 300; policy accept;
-    oifname { "eth2", "usb0" } ip ttl set 65
-    oifname { "eth2", "usb0" } ip6 hoplimit set 65
+    oifname { "eth1", "eth2", "usb0" } ip ttl set 65
+    oifname { "eth1", "eth2", "usb0" } ip6 hoplimit set 65
 }
 EOF
 
 cat << 'EOF' > package/base-files/files/etc/hotplug.d/net/99-f50-auto
 case "$ACTION" in
     add)
-        if [ "$INTERFACE" = "usb0" ] || [ "$INTERFACE" = "eth2" ]; then
+        if readlink -f "/sys/class/net/$INTERFACE/device" 2>/dev/null | grep -q "usb" || [ "$INTERFACE" = "usb0" ] || [ "$INTERFACE" = "eth1" ] || [ "$INTERFACE" = "eth2" ]; then
             [ "$(uci -q get network.f50)" != "interface" ] && uci set network.f50=interface && uci set network.f50.proto='dhcp' && uci set network.f50.metric='20' && uci set network.f50.mtu='1420'
-            [ "$(uci -q get network.f50.device)" != "$INTERFACE" ] && uci set network.f50.device="$INTERFACE" && uci commit network && /etc/init.d/network reload
+            if [ "$(uci -q get network.f50.device)" != "$INTERFACE" ]; then
+                uci set network.f50.device="$INTERFACE"
+                uci commit network
+                /etc/init.d/network reload
+            fi
             ( sleep 2 && ifup f50 ) >/dev/null 2>&1 &
         fi
         ;;
@@ -183,11 +187,11 @@ mkdir -p package/base-files/files/etc || true
 grep -qxF '/etc/openclash/' package/base-files/files/etc/sysupgrade.conf 2>/dev/null || echo '/etc/openclash/' >> package/base-files/files/etc/sysupgrade.conf
 
 # ==============================================================================
-# 7. 统一开机初始化脚本 (强制中文、Aurora 主题、BBR加速、满血 5G 命名)
+# 7. 统一开机初始化脚本 (全中文锁定、Aurora 主题、5G 稳定开启、F50 自动探测)
 # ==============================================================================
 mkdir -p package/base-files/files/etc/uci-defaults || true
 cat << 'EOF' > package/base-files/files/etc/uci-defaults/99-custom-init
-# 强制锁定简体中文与 Aurora 主题
+# 1. 强制锁定简体中文与 Aurora 主题
 uci set luci.main.lang='zh_cn'
 if [ -d "/www/luci-static/aurora" ]; then
     uci set luci.themes.Aurora='/luci-static/aurora'
@@ -195,17 +199,39 @@ if [ -d "/www/luci-static/aurora" ]; then
 fi
 uci commit luci
 
-# 强制开启 Turbo ACC 的 BBR 拥塞控制与网络硬件 PPE 加速
-uci set turboacc.@globals[0].bbr='1'
-uci set turboacc.@globals[0].sw_flow='1'
-uci set turboacc.@globals[0].hw_flow='1'
-uci commit turboacc
-
+# 2. 开启 Turbo ACC (BBR + 软硬 PPE 流量分载)
+if [ -f "/etc/config/turboacc" ]; then
+    uci set turboacc.config.sw_flow='1'
+    uci set turboacc.config.hw_flow='1'
+    uci set turboacc.config.bbr_cca='1'
+    uci commit turboacc
+fi
 uci set firewall.@defaults[0].flow_offloading='1'
 uci set firewall.@defaults[0].flow_offloading_hw='1'
+
+# 3. F50 接口自动探测 USB 总线网卡 (兼容 eth1 / eth2 / usb0)
+uci set network.f50=interface
+uci set network.f50.proto='dhcp'
+uci set network.f50.metric='20'
+uci set network.f50.mtu='1420'
+USB_DEV=$(ls -l /sys/class/net/ 2>/dev/null | grep -i "usb" | awk '{print $9}' | head -n 1)
+if [ -n "$USB_DEV" ]; then
+    uci set network.f50.device="$USB_DEV"
+else
+    uci set network.f50.device='usb0'
+fi
+uci commit network
+
+for i in $(seq 0 10); do
+    if [ "$(uci -q get firewall.@zone[$i].name)" = "wan" ]; then
+        uci del_list firewall.@zone[$i].network='f50' 2>/dev/null
+        uci add_list firewall.@zone[$i].network='f50'
+        break
+    fi
+done
 uci commit firewall
 
-# 时区与 NTP
+# 4. 时区与 NTP
 uci set system.@system[0].zonename='Asia/Shanghai'
 uci set system.@system[0].timezone='CST-8'
 uci -q delete system.ntp.server
@@ -213,22 +239,14 @@ uci add_list system.ntp.server='ntp.aliyun.com'
 uci add_list system.ntp.server='time1.cloud.tencent.com'
 uci commit system
 
-# F50 接口与跃点
-uci set network.f50=interface
-uci set network.f50.proto='dhcp'
-uci set network.f50.metric='20'
-uci set network.f50.mtu='1420'
-[ -d "/sys/class/net/usb0" ] && uci set network.f50.device='usb0'
-[ -d "/sys/class/net/eth2" ] && uci set network.f50.device='eth2'
-uci commit network
-
-# 满血 Wi-Fi 6 优化 (5G 命名为标准 5G，无 5.2G 后缀，开启 160MHz 黄金信道 36)
+# 5. 满血 Wi-Fi 6 稳定配置 (配合 wireless-regdb 使用 US 监管域，确保 36 信道不锁死)
 for r in radio0 radio1; do
     BAND=$(uci -q get wireless.$r.band)
-    uci -q delete wireless.$r.country
+    uci set wireless.$r.country='US'
     uci set wireless.$r.cell_density='0'
     uci set wireless.$r.mu_beamformer='1'
     uci set wireless.$r.disabled='0'
+    uci set wireless.default_$r.disabled='0'
     if [ "$BAND" = "5g" ]; then
         uci set wireless.$r.channel='36'
         uci set wireless.$r.htmode='HE160'
@@ -237,13 +255,14 @@ for r in radio0 radio1; do
     elif [ "$BAND" = "2g" ]; then
         uci set wireless.$r.channel='6'
         uci set wireless.$r.htmode='HE40'
+        uci set wireless.$r.noscan='1'
         uci set wireless.default_$r.ssid='Cudy-TR3000-2.4G'
         uci set wireless.default_$r.disassoc_low_ack='0'
     fi
 done
 uci commit wireless
 
-# OpenClash Meta 内核默认指向
+# 6. OpenClash 默认锁定内置 Meta 内核
 if [ -f "/etc/config/openclash" ]; then
     uci set openclash.config.core_version='linux-arm64'
     uci set openclash.config.enable_meta_core='1'
@@ -251,51 +270,15 @@ if [ -f "/etc/config/openclash" ]; then
 fi
 chmod 0755 /etc/openclash/core/clash* 2>/dev/null || true
 
-# 看门狗计划任务
+# 7. 看门狗计划任务
 CRON_JOB="*/3 * * * * /usr/bin/f50-watchdog.sh >/dev/null 2>&1"
 ( crontab -l 2>/dev/null | grep -v "f50-watchdog.sh"; echo "$CRON_JOB" ) | crontab -
 /etc/init.d/cron enable
 /etc/init.d/cron restart
 
-/etc/init.d/rpcd restart 2>/dev/null || true
-rm -rf /tmp/luci-indexcache /tmp/luci-modulecache/ 2>/dev/null || true
-
-# ==============================================================================
-# 8. 强行补齐 Turbo ACC 的 LuCI 菜单入口与 ACL 权限 (防止后台菜单隐藏)
-# ==============================================================================
-mkdir -p package/base-files/files/usr/share/luci/menu.d || true
-cat << 'EOF' > package/base-files/files/usr/share/luci/menu.d/luci-app-turboacc.json
-{
-	"admin/network/turboacc": {
-		"title": "Turbo ACC 网络加速",
-		"order": 50,
-		"action": {
-			"type": "cbi",
-			"path": "turboacc"
-		},
-		"depends": {
-			"acl": [ "luci-app-turboacc" ],
-			"uci": { "turboacc": true }
-		}
-	}
-}
-EOF
-
-mkdir -p package/base-files/files/usr/share/rpcd/acl.d || true
-cat << 'EOF' > package/base-files/files/usr/share/rpcd/acl.d/luci-app-turboacc.json
-{
-	"luci-app-turboacc": {
-		"description": "Grant access to Turbo ACC configuration",
-		"read": {
-			"uci": [ "turboacc", "network", "firewall" ]
-		},
-		"write": {
-			"uci": [ "turboacc", "network", "firewall" ]
-		}
-	}
-}
-EOF
-
+rm -rf /tmp/luci-indexcache* /tmp/luci-modulecache/* 2>/dev/null || true
 exit 0
 EOF
-chmod +x package/base-files/files/etc/uci-defaults/99-custom-init || type
+chmod +x package/base-files/files/etc/uci-defaults/99-custom-init || true
+
+exit 0
