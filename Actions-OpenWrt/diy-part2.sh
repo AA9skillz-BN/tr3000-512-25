@@ -522,7 +522,7 @@ chmod +x package/base-files/files/etc/uci-defaults/99-custom-init
 [ -x package/base-files/files/usr/bin/f50-watchdog.sh ]                || die "看门狗脚本未生成"
 [ -f package/base-files/files/etc/uci-defaults/99-custom-init ]        || die "首启脚本未生成"
 [ -f package/base-files/files/usr/share/nftables.d/table-post/99-f50-ttl.nft ] || die "TTL 规则未生成"
-grep -q 'DEVICE/cudy_tr3000-512mb-v1' "$FILOGIC_MK" || die "机型定义未注入"
+grep -q 'define Device/cudy_tr3000-512mb-v1' "$FILOGIC_MK" || die "机型定义未注入"
 grep -q 'IMAGE_SIZE := 450000k' "$FILOGIC_MK"       || die "IMAGE_SIZE 未按 512MiB 实际可用容量设置"
 grep -q "${UBI_SIZE_512M}" "$ORIG_DTS"             || die "DTS 未扩容"
 grep -q "^CONFIG_PACKAGE_luci-i18n-base-.*=y" .config || die "中文语言包未写入 .config"
