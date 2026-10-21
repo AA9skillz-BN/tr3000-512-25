@@ -5,29 +5,21 @@
 sed -i 's/192.168.1.1/192.168.6.1/g' package/base-files/files/bin/config_generate || true
 
 # ==============================================================================
-# 2. 无损复刻能开机系统的设备树：基于源码原版 mt7981b-cudy-tr3000-v1.dts 原地扩容 ubi
+# 2. 基于源码原版 mt7981b-cudy-tr3000-v1.dts 原地无损扩容 ubi 分区至 512MB
 # ==============================================================================
-DTS_DIR="target/linux/mediatek/dts"
-ORIG_DTS="$DTS_DIR/mt7981b-cudy-tr3000-v1.dts"
-
+ORIG_DTS="target/linux/mediatek/dts/mt7981b-cudy-tr3000-v1.dts"
 if [ -f "$ORIG_DTS" ]; then
-    echo "✔ 正在对源码原版设备树进行无损扩容 (保留 flash@0、nmbm 与 nvmem 属性)..."
     sed -i 's/reg = <0x5c0000 0x[0-9a-fA-F]*>/reg = <0x5c0000 0x1da40000>/g' "$ORIG_DTS"
     sed -i 's/Cudy TR3000 v1/Cudy TR3000 512MB v1/g' "$ORIG_DTS"
     echo "✔ 设备树 ubi 分区扩容修正完毕！"
-else
-    echo "❌ 错误: 未在源码中找到 $ORIG_DTS，请检查分支！"
 fi
 
 # ==============================================================================
-# 3. 注入 512MB 专属机型定义 (修正 DEVICE_DTS_DIR 为 ../dts)
+# 3. 注入 512MB 专属机型定义 (移除无用的 automount 磁盘挂载依赖)
 # ==============================================================================
 FILOGIC_MK="target/linux/mediatek/image/filogic.mk"
-if [ -f "$FILOGIC_MK" ]; then
-    HAS_DEV=$(grep -c "cudy_tr3000-512mb-v1" "$FILOGIC_MK" || true)
-    if [ "$HAS_DEV" -eq 0 ]; then
-        echo "Injecting cudy_tr3000-512mb-v1 definition into $FILOGIC_MK"
-        cat << 'EOF' >> "$FILOGIC_MK"
+if [ -f "$FILOGIC_MK" ] && ! grep -q "cudy_tr3000-512mb-v1" "$FILOGIC_MK"; then
+    cat << 'EOF' >> "$FILOGIC_MK"
 
 define Device/cudy_tr3000-512mb-v1
   DEVICE_VENDOR := Cudy
@@ -42,14 +34,15 @@ define Device/cudy_tr3000-512mb-v1
   IMAGE_SIZE := 485632k
   KERNEL_IN_UBI := 1
   IMAGE/sysupgrade.bin := sysupgrade-tar | append-metadata
-  DEVICE_PACKAGES := kmod-usb3 kmod-mt7915e kmod-mt7981-firmware mt7981-wo-firmware automount
+  DEVICE_PACKAGES := kmod-usb3 kmod-mt7915e kmod-mt7981-firmware mt7981-wo-firmware
 endef
 TARGET_DEVICES += cudy_tr3000-512mb-v1
 EOF
-    fi
 fi
 
-# 4. 在线升级核心脚本 (支持保留配置与 -n 全新刷入切换、国内加速镜像、sha256 校验、OOM 防护)
+# ==============================================================================
+# 4. 在线升级核心脚本与 LuCI 视图 (去除冗余的 openbox 停止命令)
+# ==============================================================================
 mkdir -p package/base-files/files/usr/bin || true
 cat << 'EOF' > package/base-files/files/usr/bin/auto-update-firmware.sh
 #!/bin/sh
@@ -67,12 +60,8 @@ if [ "$1" = "-n" ]; then
 fi
 
 PROXIES="https://ghfast.top/ https://ghproxy.net/"
-
 > "$LOG_FILE"
-
-log() {
-    echo "$@" >> "$LOG_FILE"
-}
+log() { echo "$@" >> "$LOG_FILE"; }
 
 log "=========================================="
 log "目标仓库: https://github.com/$REPO"
@@ -95,10 +84,7 @@ if [ -z "$RELEASE_JSON" ] || ! echo "$RELEASE_JSON" | grep -q "tag_name"; then
 fi
 
 DOWNLOAD_URL=$(echo "$RELEASE_JSON" | grep -o 'https://[^" ]*cudy_tr3000-512mb-v1[^" ]*sysupgrade\.bin' | head -n 1)
-if [ -z "$DOWNLOAD_URL" ]; then
-    DOWNLOAD_URL=$(echo "$RELEASE_JSON" | grep -o 'https://[^" ]*sysupgrade\.bin' | head -n 1)
-fi
-
+[ -z "$DOWNLOAD_URL" ] && DOWNLOAD_URL=$(echo "$RELEASE_JSON" | grep -o 'https://[^" ]*sysupgrade\.bin' | head -n 1)
 SHA_URL=$(echo "$RELEASE_JSON" | grep -o 'https://[^" ]*sha256sums' | head -n 1)
 TAG_NAME=$(echo "$RELEASE_JSON" | grep -o '"tag_name": *"[^"]*"' | head -n 1 | cut -d'"' -f4)
 
@@ -122,10 +108,7 @@ download_file() {
 
     log "正在下载 $desc (优先直连)..."
     curl -L -k --connect-timeout 8 -m 300 --progress-bar -o "$output_path" "$remote_url" 2>> "$LOG_FILE"
-    
-    if [ $? -eq 0 ] && [ -s "$output_path" ]; then
-        return 0
-    fi
+    [ $? -eq 0 ] && [ -s "$output_path" ] && return 0
 
     log "⚠ 直连下载异常或超时，自动切换至国内加速镜像重试..."
     for P in $PROXIES; do
@@ -138,13 +121,10 @@ download_file() {
             return 0
         fi
     done
-
     return 1
 }
 
-if [ -n "$SHA_URL" ]; then
-    download_file "$SHA_URL" "$TMP_SHA" "校验清单 (sha256sums)"
-fi
+[ -n "$SHA_URL" ] && download_file "$SHA_URL" "$TMP_SHA" "校验清单 (sha256sums)"
 
 download_file "$DOWNLOAD_URL" "$TMP_BIN" "系统固件镜像 (请勿断电)"
 if [ $? -ne 0 ] || [ ! -s "$TMP_BIN" ]; then
@@ -164,19 +144,14 @@ if [ -s "$TMP_SHA" ]; then
     if [ -n "$EXPECTED_HASH" ]; then
         ACTUAL_HASH=$(sha256sum "$TMP_BIN" | awk '{print $1}')
         if [ "$EXPECTED_HASH" != "$ACTUAL_HASH" ]; then
-            log "❌ 校验失败: 固件哈希不匹配，可能文件被破坏或篡改！"
-            log "期望值: $EXPECTED_HASH"
-            log "实际值: $ACTUAL_HASH"
+            log "❌ 校验失败: 固件哈希不匹配！"
             rm -f "$TMP_BIN" "$TMP_SHA"
             exit 1
         fi
         log "✔ SHA256 哈希校验完全一致 ($ACTUAL_HASH)"
-    else
-        log "⚠ 校验清单中未检索到同名条目，跳过哈希强制比对"
     fi
 fi
 
-log "正在执行固件元数据合规检查..."
 if command -v fwtool >/dev/null 2>&1; then
     if ! fwtool -q -i /dev/null "$TMP_BIN" 2>/dev/null; then
         log "❌ 固件 Header 校验不通过，非合法 OpenWrt 固件！已终止。"
@@ -186,11 +161,9 @@ if command -v fwtool >/dev/null 2>&1; then
 fi
 
 log "✔ 安全校验通过！即将以【$MODE_DESC】模式在 3 秒后写入并重启..."
-log "提示: 刷入过程中切勿断电，完成后访问 192.168.6.1"
 log "=========================================="
 
 /etc/init.d/openclash stop 2>/dev/null || true
-/etc/init.d/openbox stop 2>/dev/null || true
 sync
 echo 3 > /proc/sys/vm/drop_caches
 
@@ -199,7 +172,6 @@ exit 0
 EOF
 chmod +x package/base-files/files/usr/bin/auto-update-firmware.sh || true
 
-# 5. 注册 LuCI 菜单
 mkdir -p package/base-files/files/usr/share/luci/menu.d || true
 cat << 'EOF' > package/base-files/files/usr/share/luci/menu.d/luci-app-autoupdate.json
 {
@@ -214,7 +186,6 @@ cat << 'EOF' > package/base-files/files/usr/share/luci/menu.d/luci-app-autoupdat
 }
 EOF
 
-# 6. 注册 RPCD 访问控制列表 (ACL)
 mkdir -p package/base-files/files/usr/share/rpcd/acl.d || true
 cat << 'EOF' > package/base-files/files/usr/share/rpcd/acl.d/luci-app-autoupdate.json
 {
@@ -235,7 +206,6 @@ cat << 'EOF' > package/base-files/files/usr/share/rpcd/acl.d/luci-app-autoupdate
 }
 EOF
 
-# 7. 部署 LuCI 视图 (支持保留/不保留配置勾选切换 + 防误触二次确认)
 mkdir -p package/base-files/files/www/luci-static/resources/view/autoupdate || true
 cat << 'EOF' > package/base-files/files/www/luci-static/resources/view/autoupdate/index.js
 'use strict';
@@ -305,20 +275,6 @@ return view.extend({
 			styleNode,
 			E('h2', {}, _('在线固件升级')),
 			E('div', { 'class': 'cbi-map-descr' }, _('一键拉取 AA9skillz-BN/tr3000-512-25 仓库最新 Release 固件，支持国内镜像智能故障转移与刷机模式自由切换。')),
-
-			E('div', { 'class': 'cbi-section' }, [
-				E('div', { 'class': 'cbi-section-node' }, [
-					E('div', { 'class': 'cbi-value' }, [
-						E('label', { 'class': 'cbi-value-title' }, _('目标机型')),
-						E('div', { 'class': 'cbi-value-field' }, E('strong', {}, 'Cudy TR3000 (512MB Flash)'))
-					]),
-					E('div', { 'class': 'cbi-value' }, [
-						E('label', { 'class': 'cbi-value-title' }, _('更新通道')),
-						E('div', { 'class': 'cbi-value-field' }, 'GitHub Releases (含国内备用镜像通道)')
-					])
-				])
-			]),
-
 			E('div', { 'class': 'cbi-section' }, [
 				E('h3', {}, _('升级控制台')),
 				E('div', { 'class': 'cbi-section-node' }, [
@@ -334,12 +290,9 @@ return view.extend({
 							'class': 'cbi-button cbi-button-action important',
 							'click': function(ev) {
 								var keep = document.getElementById('chk_keep_config').checked;
-								if (!keep) {
-									if (!window.confirm('⚠️ 确定要【不保留配置】升级吗？\n\n这将会抹除路由器上所有的个人配置和后装插件，恢复到新固件的初始出厂状态！')) {
-										return;
-									}
+								if (!keep && !window.confirm('⚠️ 确定要【不保留配置】升级吗？\n\n这将会抹除路由器上所有的个人配置，恢复到初始出厂状态！')) {
+									return;
 								}
-
 								ev.target.disabled = true;
 								document.getElementById('chk_keep_config').disabled = true;
 								document.getElementById('ota_progress').style.display = 'block';
@@ -349,34 +302,22 @@ return view.extend({
 								dot.className = 'ota-dot dot-down active';
 								txt.innerText = keep ? '正在拉取固件 (保留配置模式)...' : '正在拉取固件 (全新恢复出厂模式)...';
 
-								ui.showModal(_('正在处理'), [
-									E('p', { 'class': 'spinning' }, _('OTA 升级程序已启动，请关注下方动态进度条与实时输出...'))
-								]);
-								setTimeout(function() { ui.hideModal(); }, 2000);
-
 								var cmd = keep ? '/usr/bin/auto-update-firmware.sh >/dev/null 2>&1 &' : '/usr/bin/auto-update-firmware.sh -n >/dev/null 2>&1 &';
 								fs.exec('/bin/sh', ['-c', cmd]);
 
 								var poll = window.setInterval(function() {
 									var logArea = document.getElementById('update_log_area');
-									if (!logArea) {
-										window.clearInterval(poll);
-										return;
-									}
-
+									if (!logArea) { window.clearInterval(poll); return; }
 									fs.read_direct('/tmp/firmware_update.log').then(function(res) {
 										if (res) {
 											logArea.value = res;
 											logArea.scrollTop = logArea.scrollHeight;
-
-											if (res.indexOf('加速镜像') !== -1) {
-												txt.innerText = '已切换国内加速通道下载中...';
-											}
+											if (res.indexOf('加速镜像') !== -1) txt.innerText = '已切换国内加速通道下载中...';
 											if (res.indexOf('SHA256 完整性比对') !== -1) {
 												dot.className = 'ota-dot dot-check active';
 												txt.innerText = '正在校验固件哈希一致性...';
 											}
-											if (res.indexOf('安全校验通过') !== -1 || res.indexOf('执行写入') !== -1) {
+											if (res.indexOf('安全校验通过') !== -1) {
 												dot.className = 'ota-dot dot-flash active';
 												txt.innerText = '⚠️ 正在刷入闪存并重启，请勿断电！';
 												document.getElementById('btn_start_update').innerText = '正在写入闪存中...';
@@ -405,10 +346,8 @@ return view.extend({
 				])
 			])
 		]);
-
 		return viewDOM;
 	},
-
 	handleSaveApply: null,
 	handleSave: null,
 	handleReset: null
@@ -416,7 +355,7 @@ return view.extend({
 EOF
 
 # ==============================================================================
-# 8. 部署 F50 防限速 TTL=65 (原生 fw4 挂载) 与 USB 热插拔自愈看门狗
+# 5. 部署 F50 防限速 TTL=65 (原生 fw4 挂载) 与 USB 热插拔自愈看门狗
 # ==============================================================================
 mkdir -p package/base-files/files/usr/share/nftables.d/table-post || true
 cat << 'EOF' > package/base-files/files/usr/share/nftables.d/table-post/99-f50-ttl.nft
@@ -476,14 +415,10 @@ EOF
 chmod +x package/base-files/files/usr/bin/f50-watchdog.sh || true
 
 # ==============================================================================
-# 9. 预置 OpenClash 最新 ARM64 Meta (Mihomo) 内核 (直接注入插件源码目录防冲突)
+# 6. 预置 OpenClash 最新 ARM64 Meta (Mihomo) 内核 (使用软链接代替双份复制，省 25MB 空间)
 # ==============================================================================
-echo "正在为 Cudy TR3000 (aarch64) 下载并内置 OpenClash Meta (Mihomo) 内核..."
-# 优先直接放入 OpenClash 软件包自身目录，避免与 base-files 产生文件归属权冲突
 OC_ROOT="package/luci-app-openclash/root/etc/openclash"
-if [ ! -d "$OC_ROOT" ]; then
-    OC_ROOT="package/base-files/files/etc/openclash"
-fi
+[ ! -d "$OC_ROOT" ] && OC_ROOT="package/base-files/files/etc/openclash"
 CORE_DIR="$OC_ROOT/core"
 mkdir -p "$CORE_DIR"
 
@@ -491,13 +426,12 @@ META_URL="https://raw.githubusercontent.com/vernesong/OpenClash/core/master/meta
 if curl -sL --connect-timeout 15 --retry 3 "$META_URL" -o /tmp/clash_meta.tar.gz; then
     tar -zxf /tmp/clash_meta.tar.gz -C "$CORE_DIR"
     mv -f "$CORE_DIR/clash" "$CORE_DIR/clash_meta" 2>/dev/null || true
-    cp -f "$CORE_DIR/clash_meta" "$CORE_DIR/clash" 2>/dev/null || true
-    chmod 0755 "$CORE_DIR/clash_meta" "$CORE_DIR/clash" 2>/dev/null || true
+    ln -sf clash_meta "$CORE_DIR/clash"
+    chmod 0755 "$CORE_DIR/clash_meta"
     rm -f /tmp/clash_meta.tar.gz
     echo "✔ OpenClash Meta (clash_meta) 内核预置成功！"
 fi
 
-# 直接更新 OpenClash 源码包自带的 GeoIP / GeoSite 文件（归属权仍属于 luci-app-openclash，绝不冲突）
 curl -sL --connect-timeout 15 --retry 2 "https://raw.githubusercontent.com/alecthw/mmdb_china_ip_list/release/lite/Country.mmdb" -o "$OC_ROOT/Country.mmdb" || true
 curl -sL --connect-timeout 15 --retry 2 "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geosite.dat" -o "$OC_ROOT/GeoSite.dat" || true
 curl -sL --connect-timeout 15 --retry 2 "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geoip.dat" -o "$OC_ROOT/GeoIP.dat" || true
@@ -506,11 +440,10 @@ mkdir -p package/base-files/files/etc || true
 grep -qxF '/etc/openclash/' package/base-files/files/etc/sysupgrade.conf 2>/dev/null || echo '/etc/openclash/' >> package/base-files/files/etc/sysupgrade.conf
 
 # ==============================================================================
-# 10. 统一开机初始化脚本 (合并主题、时区、PPE加速、满血Wi-Fi、F50与OpenClash)
+# 7. 统一开机初始化脚本 (合并主题、时区、PPE加速、满血Wi-Fi、F50与OpenClash)
 # ==============================================================================
 mkdir -p package/base-files/files/etc/uci-defaults || true
 cat << 'EOF' > package/base-files/files/etc/uci-defaults/99-custom-init
-# 1. 语言与 Aurora 主题安全激活
 uci set luci.main.lang='zh_cn'
 if [ -d "/www/luci-static/aurora" ]; then
     uci set luci.themes.Aurora='/luci-static/aurora'
@@ -518,7 +451,6 @@ if [ -d "/www/luci-static/aurora" ]; then
 fi
 uci commit luci
 
-# 2. 系统时区与国内高可用 NTP
 uci set system.@system[0].zonename='Asia/Shanghai'
 uci set system.@system[0].timezone='CST-8'
 uci -q delete system.ntp.server
@@ -527,7 +459,6 @@ uci add_list system.ntp.server='time1.cloud.tencent.com'
 uci add_list system.ntp.server='cn.pool.ntp.org'
 uci commit system
 
-# 3. F50 接口与 MTK PPE 硬件加速
 uci set network.f50=interface
 uci set network.f50.proto='dhcp'
 uci set network.f50.metric='20'
@@ -550,7 +481,6 @@ for i in $(seq 0 10); do
 done
 uci commit firewall
 
-# 4. 满血 MT7981B Wi-Fi 6 优化 (无锁死隐患 + 波束成形 + 黄金信道)
 for r in radio0 radio1; do
     BAND=$(uci -q get wireless.$r.band)
     uci -q delete wireless.$r.country
@@ -570,7 +500,6 @@ for r in radio0 radio1; do
 done
 uci commit wireless
 
-# 5. OpenClash 默认锁定内置 Meta 内核
 if [ -f "/etc/config/openclash" ]; then
     uci set openclash.config.core_version='linux-arm64'
     uci set openclash.config.enable_meta_core='1'
@@ -578,7 +507,6 @@ if [ -f "/etc/config/openclash" ]; then
 fi
 chmod 0755 /etc/openclash/core/clash* 2>/dev/null || true
 
-# 6. 注册 F50 3分钟保活计划任务
 CRON_JOB="*/3 * * * * /usr/bin/f50-watchdog.sh >/dev/null 2>&1"
 ( crontab -l 2>/dev/null | grep -v "f50-watchdog.sh"; echo "$CRON_JOB" ) | crontab -
 /etc/init.d/cron enable
@@ -589,49 +517,5 @@ rm -rf /tmp/luci-indexcache /tmp/luci-modulecache/ 2>/dev/null || true
 exit 0
 EOF
 chmod +x package/base-files/files/etc/uci-defaults/99-custom-init || true
-
-# ==============================================================================
-# 11. 强制兜底锁死核心配置包
-# ==============================================================================
-sed -i '/luci-theme-argon/d' .config 2>/dev/null || true
-sed -i '/luci-app-argon-config/d' .config 2>/dev/null || true
-
-cat << 'EOF' >> .config
-# CONFIG_PACKAGE_luci-theme-argon is not set
-# CONFIG_PACKAGE_luci-app-argon-config is not set
-CONFIG_PACKAGE_luci=y
-CONFIG_PACKAGE_luci-base=y
-CONFIG_PACKAGE_luci-compat=y
-CONFIG_PACKAGE_luci-i18n-base-zh-cn=y
-CONFIG_PACKAGE_luci-theme-aurora=y
-CONFIG_PACKAGE_luci-app-aurora-config=y
-CONFIG_PACKAGE_luci-i18n-aurora-config-zh-cn=y
-CONFIG_PACKAGE_luci-app-openclash=y
-CONFIG_PACKAGE_dnsmasq-full=y
-CONFIG_PACKAGE_dnsmasq_full_nftset=y
-CONFIG_PACKAGE_luci-app-turboacc=y
-CONFIG_PACKAGE_luci-i18n-turboacc-zh-cn=y
-CONFIG_PACKAGE_TURBOACC_INCLUDE_OFFLOADING=y
-CONFIG_PACKAGE_luci-app-ttyd=y
-CONFIG_PACKAGE_luci-i18n-ttyd-zh-cn=y
-CONFIG_PACKAGE_kmod-usb-net=y
-CONFIG_PACKAGE_kmod-usb-net-rndis=y
-CONFIG_PACKAGE_kmod-usb-net-cdc-ether=y
-CONFIG_PACKAGE_kmod-usb-net-cdc-ncm=y
-CONFIG_PACKAGE_kmod-tun=y
-CONFIG_PACKAGE_kmod-inet-diag=y
-CONFIG_PACKAGE_kmod-nft-tproxy=y
-CONFIG_PACKAGE_kmod-nft-socket=y
-CONFIG_PACKAGE_kmod-nft-nat=y
-CONFIG_PACKAGE_ip-full=y
-CONFIG_PACKAGE_ca-bundle=y
-CONFIG_PACKAGE_curl=y
-CONFIG_PACKAGE_jq=y
-CONFIG_PACKAGE_ruby=y
-CONFIG_PACKAGE_ruby-yaml=y
-CONFIG_PACKAGE_libcap=y
-CONFIG_PACKAGE_libcap-bin=y
-CONFIG_PACKAGE_usb-modeswitch=y
-EOF
 
 exit 0
