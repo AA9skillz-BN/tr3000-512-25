@@ -47,6 +47,7 @@ env:
 jobs:
   build:
     runs-on: ubuntu-22.04
+    timeout-minutes: 350
 
     steps:
     - name: Checkout
@@ -54,7 +55,9 @@ jobs:
 
     - name: Clean older releases before build
       uses: dev-drprasad/delete-older-releases@v0.3.3
-      if: github.event.inputs.clean_release == 'true' && github.event.inputs.only_config != 'true'
+      # 注意：schedule / repository_dispatch 触发时 github.event.inputs 为空，
+      # 用 == 'true' 判断会让定时构建永远不清 release，所以这里用 != 'false'。
+      if: github.event.inputs.clean_release != 'false' && github.event.inputs.only_config != 'true'
       continue-on-error: true
       with:
         keep_latest: 2
@@ -96,9 +99,11 @@ jobs:
 
     - name: Load custom feeds
       run: |
-        chmod +x $DIY_P1_SH
+        # 不要加 || true：diy-part1 内部已有 die()，失败必须中断构建，
+        # 否则主题/OpenClash 会静默缺失，而 defconfig 只会默默删掉对应符号。
+        chmod +x "$GITHUB_WORKSPACE/$DIY_P1_SH"
         cd openwrt
-        $GITHUB_WORKSPACE/$DIY_P1_SH || true
+        "$GITHUB_WORKSPACE/$DIY_P1_SH"
 
     - name: Update and Install feeds
       run: |
@@ -113,13 +118,13 @@ jobs:
             echo "✔ 成功加载配置文件: $CONFIG_FILE"
             cp -f "$CONFIG_FILE" openwrt/.config
         else
-            FOUND_CFG=$(find . -maxdepth 3 \( -name ".config" -o -name "*.config" \) | head -n 1)
+            FOUND_CFG=$(find . -maxdepth 3 -name ".config" | head -n 1)
             [ -n "$FOUND_CFG" ] && cp -f "$FOUND_CFG" openwrt/.config
         fi
 
-        chmod +x $DIY_P2_SH
+        chmod +x "$GITHUB_WORKSPACE/$DIY_P2_SH"
         cd openwrt
-        $GITHUB_WORKSPACE/$DIY_P2_SH || true
+        "$GITHUB_WORKSPACE/$DIY_P2_SH"
 
         if [ -n "$EXTRA_CFG" ]; then
             printf "\n# --- User Extra Config ---\n%s\n" "$EXTRA_CFG" >> .config
@@ -131,12 +136,29 @@ jobs:
       id: package
       run: |
         cd openwrt
-        sed -i 's/CONFIG_TARGET_mediatek_filogic_DEVICE_.*=y/CONFIG_TARGET_mediatek_filogic_DEVICE_cudy_tr3000-512mb-v1=y/g' .config 2>/dev/null || true
-        echo "CONFIG_LUCI_LANG_zh_Hans=y" >> .config
+        DEVICE_CONFIG='CONFIG_TARGET_mediatek_filogic_DEVICE_cudy_tr3000-512mb-v1'
+        if grep -q '^CONFIG_TARGET_mediatek_filogic_DEVICE_' .config; then
+            sed -i "s/^CONFIG_TARGET_mediatek_filogic_DEVICE_.*=y/${DEVICE_CONFIG}=y/" .config
+        else
+            echo "${DEVICE_CONFIG}=y" >> .config
+        fi
+
         make defconfig
-        # 二次锁定：把 defconfig 生成的所有 zh-cn 语言包可选项全部激活为 =y
-        sed -i 's/# CONFIG_PACKAGE_luci-i18n-\(.*\)-zh-cn is not set/CONFIG_PACKAGE_luci-i18n-\1-zh-cn=y/g' .config 2>/dev/null || true
-        make defconfig
+
+        # defconfig 对不存在的设备/软件包是"静默丢弃"，必须显式校验机型还在
+        if ! grep -qx "${DEVICE_CONFIG}=y" .config; then
+            echo "::error::目标机型 ${DEVICE_CONFIG} 未生效（设备定义缺失或被 defconfig 丢弃）"
+            grep -E '^CONFIG_TARGET_.*DEVICE_' .config | head -n 20 || true
+            exit 1
+        fi
+
+        # 中文语言包同样会被静默丢弃（不同 LuCI 版本后缀是 zh-cn 或 zh_Hans），
+        # 一个都没留下就说明界面会整片回退英文
+        if ! grep -qE '^CONFIG_PACKAGE_luci-i18n-base-zh[-_A-Za-z]*=y' .config; then
+            echo "::error::中文 base 语言包未生效，界面会回退英文"
+            grep -E 'CONFIG_PACKAGE_luci-i18n' .config | head -n 20 || true
+            exit 1
+        fi
 
         echo "DEVICE_NAME=_cudy_tr3000-512mb-v1" >> $GITHUB_ENV
         echo "FILE_DATE=_$(date +"%Y%m%d%H%M")" >> $GITHUB_ENV
@@ -157,9 +179,12 @@ jobs:
       if: env.ONLY_CONFIG != 'true'
       run: |
         cd openwrt
-        make tools/compile -j$(nproc) || make tools/compile -j1 V=s
-        make toolchain/compile -j$(nproc) || make toolchain/compile -j1 V=s
-        make -j$(nproc) || make -j1 V=s
+        make tools/compile -j"$(nproc)" || make tools/compile -j1 V=s
+        make toolchain/compile -j"$(nproc)" || make toolchain/compile -j1 V=s
+        if ! make -j"$(nproc)"; then
+            echo "::warning::并行编译失败，回退串行重编（耗时会长很多，请先看上面的报错）"
+            make -j1 V=s
+        fi
         echo "status=success" >> $GITHUB_OUTPUT
 
     - name: Organize files
@@ -170,10 +195,18 @@ jobs:
         if [ "$ONLY_CONFIG" = "true" ]; then
             cp -f openwrt/.config /tmp/firmware_out/.config
         else
-            cd openwrt/bin/targets/*/*
-            cp -f *cudy_tr3000-512mb-v1*.bin /tmp/firmware_out/ 2>/dev/null || true
-            cp -f *sysupgrade.bin /tmp/firmware_out/ 2>/dev/null || true
-            cp -f sha256sums /tmp/firmware_out/ 2>/dev/null || true
+            BIN_DIR=$(find openwrt/bin/targets -type f -name 'sha256sums' -printf '%h\n' | head -n 1)
+            if [ -z "$BIN_DIR" ]; then
+                echo "::error::未找到 openwrt/bin/targets 下的产物目录"
+                exit 1
+            fi
+            cp -f "$BIN_DIR"/sha256sums /tmp/firmware_out/ 2>/dev/null || true
+            cp -f "$BIN_DIR"/*cudy_tr3000-512mb-v1*.bin /tmp/firmware_out/ 2>/dev/null || true
+            if ! ls /tmp/firmware_out/*.bin >/dev/null 2>&1; then
+                echo "::error::没有生成任何 cudy_tr3000-512mb-v1 固件"
+                ls -l "$BIN_DIR" || true
+                exit 1
+            fi
         fi
         echo "FIRMWARE=/tmp/firmware_out" >> $GITHUB_ENV
         echo "status=success" >> $GITHUB_OUTPUT
@@ -196,7 +229,7 @@ jobs:
         echo "• 源码仓库: ${{ env.ACTUAL_REPO }} (${{ env.ACTUAL_BRANCH }})" >> release.txt
         echo "• 默认后台: 192.168.6.1" >> release.txt
         echo "• 硬件分区: U-Boot 请选择 mod-490 布局" >> release.txt
-        echo "• 预置功能: Aurora 现代主题 / OpenClash (内置 Meta 内核) / 中兴 F50 5G 即插即用 / MTK PPE 硬件加速 / 双模式在线升级" >> release.txt
+        echo "• 预置功能: Aurora 现代主题 / OpenClash (内置 Meta 内核) / 中兴 F50 5G 即插即用 / BBR 拥塞控制 / TTL=65 防限速（已关闭 flow offload 以保证 TTL 生效）" >> release.txt
         echo "status=success" >> $GITHUB_OUTPUT
 
     - name: Upload firmware to release
