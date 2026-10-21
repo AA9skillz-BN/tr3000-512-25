@@ -152,11 +152,20 @@ jobs:
             exit 1
         fi
 
-        # 中文语言包同样会被静默丢弃（不同 LuCI 版本后缀是 zh-cn 或 zh_Hans），
-        # 一个都没留下就说明界面会整片回退英文
+        # 中文语言包同样会被静默丢弃：.config 里 -zh-cn / -zh_Hans 两种名字都列了，
+        # defconfig 会保留真实存在的那个。两个都没留下 = 界面会整片回退英文。
         if ! grep -qE '^CONFIG_PACKAGE_luci-i18n-base-zh[-_A-Za-z]*=y' .config; then
             echo "::error::中文 base 语言包未生效，界面会回退英文"
-            grep -E 'CONFIG_PACKAGE_luci-i18n' .config | head -n 20 || true
+            echo "--- .config 里残留的 i18n 行 ---"
+            grep -E 'CONFIG_PACKAGE_luci-i18n' .config || echo "(无)"
+            echo "--- feeds 目录里实际有哪些 i18n-base 包 ---"
+            ls package/feeds/*/ 2>/dev/null | grep -i 'i18n-base' | head -n 20 || echo "(没找到)"
+            echo "--- package/feeds 下的 feed 列表 ---"
+            ls package/feeds/ 2>/dev/null || echo "(package/feeds 不存在)"
+            echo "--- package/feeds/luci 前 30 项 ---"
+            ls package/feeds/luci 2>/dev/null | head -n 30 || echo "(package/feeds/luci 不存在)"
+            echo "--- luci feed 里的 i18n 包 ---"
+            ls feeds/luci 2>/dev/null | grep -i '^luci-i18n-base' | head -n 10 || echo "(feeds/luci 下没有)"
             exit 1
         fi
 
