@@ -1,28 +1,56 @@
 #!/bin/bash
 # Description: OpenWrt DIY script part 2 (After Update feeds)
+#
+# 设计原则：任何一步失败都必须让构建失败。
+# 不要用 `|| true` 掩盖错误 —— 否则会产出"构建全绿、功能缺失"的固件
+# （主题没编进去 / DTS 没扩容 / Meta 内核没打进 / 机型定义没生效）。
+set -euo pipefail
 
-# 1. 修改默认后台 IP 为 192.168.6.1
-sed -i 's/192.168.1.1/192.168.6.1/g' package/base-files/files/bin/config_generate || true
-
-# 2. 从源码底层模板直接解除 Wi-Fi 默认禁用 (防止 mac80211.uc / mac80211.sh 生成 disabled=1)
-find package/network/config/wifi-scripts/ -type f -name "mac80211.*" -exec sed -i 's/disabled=1/disabled=0/g; s/disabled 1/disabled 0/g' {} + 2>/dev/null || true
-find package/kernel/mac80211/ -type f -name "mac80211.*" -exec sed -i 's/disabled=1/disabled=0/g; s/disabled 1/disabled 0/g' {} + 2>/dev/null || true
+die() { echo "❌ [diy-part2] $*" >&2; exit 1; }
 
 # ==============================================================================
-# 3. 基于源码原版 mt7981b-cudy-tr3000-v1.dts 原地无损扩容 ubi 分区至 512MB
+# 1. 修改默认后台 IP 为 192.168.6.1
+# ==============================================================================
+CFG_GEN="package/base-files/files/bin/config_generate"
+[ -f "$CFG_GEN" ] || die "$CFG_GEN 不存在，源码结构可能已变化"
+sed -i 's/192\.168\.1\.1/192.168.6.1/g' "$CFG_GEN"
+grep -q '192\.168\.6\.1' "$CFG_GEN" || die "默认后台 IP 修改失败：$CFG_GEN 中未找到 192.168.1.1"
+echo "✔ 默认后台 IP 已改为 192.168.6.1"
+
+# ==============================================================================
+# 2. 基于源码原版 mt7981b-cudy-tr3000-v1.dts 原地扩容 ubi 分区（512MiB 颗粒）
+#    实测分区表(BL2/u-boot-env/Factory/bdinfo/FIP)之和 = 0x5c0000，
+#    与源码 DTS 的 ubi 起始地址一致，所以只改 size 即可。
 # ==============================================================================
 ORIG_DTS="target/linux/mediatek/dts/mt7981b-cudy-tr3000-v1.dts"
-if [ -f "$ORIG_DTS" ]; then
-    sed -i 's/reg = <0x5c0000 0x[0-9a-fA-F]*>/reg = <0x5c0000 0x1da40000>/g' "$ORIG_DTS"
-    sed -i 's/Cudy TR3000 v1/Cudy TR3000 512MB v1/g' "$ORIG_DTS"
-    echo "✔ 设备树 ubi 分区扩容修正完毕！"
-fi
+UBI_OFFSET="0x5c0000"      # BL2(1M) + u-boot-env(512K) + Factory(2M) + bdinfo(256K) + FIP(2M)
+# 0x1da40000 是本机现有 U-Boot(mod) 布局里的实际取值：
+#   0x5c0000 + 0x1da40000 = 0x1E000000 = 480MiB，512MiB 颗粒末尾还有 32MiB 不属于任何分区。
+# 想把这 32MiB 也用上，需改成 0x1fa40000 (= 0x20000000 - 0x5c0000)，
+# 并先确认 U-Boot 没有在 flash 尾部放 env/备份，否则会直接覆盖掉。
+UBI_SIZE_512M="0x1da40000"
+
+[ -f "$ORIG_DTS" ] || die "设备树不存在: $ORIG_DTS（源码分支可能已改名或换了布局）"
+
+UBI_HITS=$(grep -c "reg = <${UBI_OFFSET} " "$ORIG_DTS" || true)
+[ "$UBI_HITS" = "1" ] || die "$ORIG_DTS 中匹配到 ${UBI_HITS} 处 reg = <${UBI_OFFSET} ...> 分区（期望正好 1 处），请人工确认分区布局"
+
+sed -i "s/reg = <${UBI_OFFSET} 0x[0-9a-fA-F]*>/reg = <${UBI_OFFSET} ${UBI_SIZE_512M}>/" "$ORIG_DTS"
+sed -i 's/Cudy TR3000 v1/Cudy TR3000 512MB v1/g' "$ORIG_DTS"
+
+grep -q "reg = <${UBI_OFFSET} ${UBI_SIZE_512M}>" "$ORIG_DTS" \
+    || die "ubi 分区扩容未生效（期望 reg = <${UBI_OFFSET} ${UBI_SIZE_512M}>）"
+echo "✔ 设备树 ubi 分区已扩容到 480MiB 布局（512MiB 颗粒）：$ORIG_DTS"
 
 # ==============================================================================
-# 4. 注入 512MB 专属机型定义
+# 3. 注入 512MB 专属机型定义
 # ==============================================================================
 FILOGIC_MK="target/linux/mediatek/image/filogic.mk"
-if [ -f "$FILOGIC_MK" ] && ! grep -q "cudy_tr3000-512mb-v1" "$FILOGIC_MK"; then
+[ -f "$FILOGIC_MK" ] || die "$FILOGIC_MK 不存在"
+
+if grep -q "cudy_tr3000-512mb-v1" "$FILOGIC_MK"; then
+    echo "✔ 机型 cudy_tr3000-512mb-v1 已存在，跳过注入"
+else
     cat << 'EOF' >> "$FILOGIC_MK"
 
 define Device/cudy_tr3000-512mb-v1
@@ -31,335 +59,170 @@ define Device/cudy_tr3000-512mb-v1
   DEVICE_VARIANT := 512MB v1
   DEVICE_DTS := mt7981b-cudy-tr3000-v1
   DEVICE_DTS_DIR := ../dts
+  # 注意：cudy,tr3000-v1 必须保留 —— DTS 的 compatible 没有改名，
+  # /tmp/sysinfo/board_name 仍上报 cudy,tr3000-v1，删掉会导致本机 sysupgrade 被拒。
+  # 副作用：未硬改 128MB 的原机也能刷入本镜像并变砖，对外发布时必须写明限制。
   SUPPORTED_DEVICES += R47 cudy,tr3000-v1 cudy,tr3000-512mb-v1
   UBINIZE_OPTS := -E 5
   BLOCKSIZE := 128k
   PAGESIZE := 2048
-  IMAGE_SIZE := 485632k
+  # ubi 分区 = 0x1da40000 = 485632KiB（0x5c0000 + 0x1da40000 = 0x1E000000 = 480MiB，
+  # 512MiB 颗粒末尾 32MiB 未分配）。UBI 实际可用上限还要更小：
+  #   3794 PEB - 73 坏块预留 - 2 layout LEB = 3719 LEB x 124KiB ≈ 450.3MiB
+  # 所以取 450000k 留有约 10MiB 余量。写 485632k(=分区大小) 等于把尺寸检查关掉，
+  # 镜像一旦超限只会在写入阶段失败，那才是真正会变砖的时刻。
+  IMAGE_SIZE := 450000k
   KERNEL_IN_UBI := 1
   IMAGE/sysupgrade.bin := sysupgrade-tar | append-metadata
-  DEVICE_PACKAGES := kmod-usb3 kmod-mt7915e kmod-mt7981-firmware mt7981-wo-firmware wireless-regdb
+  DEVICE_PACKAGES := kmod-usb3 kmod-mt7915e kmod-mt7981-firmware mt7981-wo-firmware
 endef
 TARGET_DEVICES += cudy_tr3000-512mb-v1
 EOF
+    echo "✔ 已注入机型 cudy_tr3000-512mb-v1"
 fi
 
 # ==============================================================================
-# 5. 在线升级核心脚本与完整 LuCI 视图
+# 4. 在线升级脚本（SSH 执行：auto-update-firmware.sh [-n]）
+#    - 全程校验证书，不再用 curl -k
+#    - 下载后强制 SHA256 校验 + tar 结构校验 + sysupgrade -T 合规性预检
+#    - 下载前/后都检查 /tmp(tmpfs) 剩余空间
 # ==============================================================================
-mkdir -p package/base-files/files/usr/bin || true
+mkdir -p package/base-files/files/usr/bin
 cat << 'EOF' > package/base-files/files/usr/bin/auto-update-firmware.sh
 #!/bin/sh
+# Cudy TR3000 512MB 在线升级：拉取最新 Release -> 校验 -> sysupgrade
+# 用法: auto-update-firmware.sh        保留当前配置升级
+#       auto-update-firmware.sh -n     不保留配置（恢复出厂）
 
 REPO="AA9skillz-BN/tr3000-512-25"
 LOG_FILE="/tmp/firmware_update.log"
 TMP_BIN="/tmp/firmware_upgrade.bin"
 TMP_SHA="/tmp/sha256sums"
+MIN_FREE_KB=32768          # 下载前 /tmp 至少要有 32MiB
+HEADROOM_KB=16384          # 下载后还要留 16MiB 余量
+PROXIES="https://ghfast.top/ https://ghproxy.net/"
 
 UPGRADE_OPTS=""
 MODE_DESC="保留当前配置 (无缝升级)"
-if [ "$1" = "-n" ]; then
+if [ "${1:-}" = "-n" ]; then
     UPGRADE_OPTS="-n"
     MODE_DESC="不保留配置 (恢复出厂全新刷入)"
 fi
 
-PROXIES="https://ghfast.top/ https://ghproxy.net/"
-> "$LOG_FILE"
+: > "$LOG_FILE"
 log() { echo "$@" >> "$LOG_FILE"; }
+die() { log "❌ $*"; exit 1; }
 
 log "=========================================="
 log "目标仓库: https://github.com/$REPO"
 log "升级模式: $MODE_DESC"
-log "正在检测网络并连接 GitHub API..."
 log "=========================================="
 
+# ---------- 1. 取最新 Release ----------
 API_URL="https://api.github.com/repos/$REPO/releases/latest"
-RELEASE_JSON=$(curl -sL -m 15 -H "User-Agent: Cudy-TR3000-OTA" "$API_URL")
+RELEASE_JSON=$(curl -fsSL -m 15 -H "User-Agent: Cudy-TR3000-OTA" "$API_URL" 2>>"$LOG_FILE" || true)
 
-if [ -z "$RELEASE_JSON" ] || ! echo "$RELEASE_JSON" | grep -q "tag_name"; then
-    log "⚠ 直连 GitHub API 超时，正在尝试加速镜像通道..."
+if ! echo "$RELEASE_JSON" | grep -q '"tag_name"'; then
     for P in $PROXIES; do
-        RELEASE_JSON=$(curl -sL -m 15 -H "User-Agent: Cudy-TR3000-OTA" "${P}${API_URL}")
-        if echo "$RELEASE_JSON" | grep -q "tag_name"; then
-            log "✔ 成功通过加速镜像获取元数据: $P"
-            break
-        fi
+        RELEASE_JSON=$(curl -fsSL -m 15 -H "User-Agent: Cudy-TR3000-OTA" "${P}${API_URL}" 2>>"$LOG_FILE" || true)
+        echo "$RELEASE_JSON" | grep -q '"tag_name"' && break
     done
 fi
+echo "$RELEASE_JSON" | grep -q '"tag_name"' || die "无法获取 Release 信息（GitHub API 与镜像通道均失败）"
+
+TAG=$(echo "$RELEASE_JSON" | grep -o '"tag_name"[[:space:]]*:[[:space:]]*"[^"]*"' | head -n 1 | cut -d'"' -f4)
+log "最新版本: ${TAG:-unknown}"
 
 DOWNLOAD_URL=$(echo "$RELEASE_JSON" | grep -o 'https://[^" ]*cudy_tr3000-512mb-v1[^" ]*sysupgrade\.bin' | head -n 1)
 [ -z "$DOWNLOAD_URL" ] && DOWNLOAD_URL=$(echo "$RELEASE_JSON" | grep -o 'https://[^" ]*sysupgrade\.bin' | head -n 1)
 SHA_URL=$(echo "$RELEASE_JSON" | grep -o 'https://[^" ]*sha256sums' | head -n 1)
-TAG_NAME=$(echo "$RELEASE_JSON" | grep -o '"tag_name": *"[^"]*"' | head -n 1 | cut -d'"' -f4)
+[ -n "$DOWNLOAD_URL" ] || die "最新 Release 中没有 sysupgrade 镜像"
+log "镜像地址: $DOWNLOAD_URL"
 
-if [ -z "$DOWNLOAD_URL" ]; then
-    log "❌ 检查失败: 未能在最新 Release 中找到匹配的固件！"
-    exit 1
-fi
+# ---------- 2. 空间检查 ----------
+AVAIL_KB=$(df -k /tmp 2>/dev/null | awk 'NR==2 {print $4}')
+[ -n "${AVAIL_KB:-}" ] || AVAIL_KB=0
+log "/tmp 可用空间: ${AVAIL_KB} KiB"
+[ "$AVAIL_KB" -ge "$MIN_FREE_KB" ] || die "/tmp 可用空间不足 ${MIN_FREE_KB}KiB，请清理后重试"
 
-log "✔ 发现可用版本: ${TAG_NAME:-最新发布}"
-log "固件直连源: $DOWNLOAD_URL"
-echo "" >> "$LOG_FILE"
-
-sync
-echo 3 > /proc/sys/vm/drop_caches
 rm -f "$TMP_BIN" "$TMP_SHA"
 
+# ---------- 3. 下载（主站失败自动走镜像，全程校验证书） ----------
 download_file() {
-    local remote_url="$1"
-    local output_path="$2"
+    local url="$1"
+    local out="$2"
     local desc="$3"
 
-    log "正在下载 $desc (优先直连)..."
-    curl -L -k --connect-timeout 8 -m 300 --progress-bar -o "$output_path" "$remote_url" 2>> "$LOG_FILE"
-    [ $? -eq 0 ] && [ -s "$output_path" ] && return 0
+    curl -fsSL --connect-timeout 8 -m 300 -o "$out" "$url" 2>>"$LOG_FILE"
+    if [ $? -eq 0 ] && [ -s "$out" ]; then
+        log "✔ $desc 下载完成: $(wc -c < "$out") 字节"
+        return 0
+    fi
 
-    log "⚠ 直连下载异常或超时，自动切换至国内加速镜像重试..."
     for P in $PROXIES; do
-        local proxy_url="${P}${remote_url}"
-        log "尝试镜像通道: $proxy_url"
-        rm -f "$output_path"
-        curl -L -k --connect-timeout 10 -m 300 --progress-bar -o "$output_path" "$proxy_url" 2>> "$LOG_FILE"
-        if [ $? -eq 0 ] && [ -s "$output_path" ]; then
-            log "✔ 镜像通道拉取成功"
+        rm -f "$out"
+        curl -fsSL --connect-timeout 10 -m 300 -o "$out" "${P}${url}" 2>>"$LOG_FILE"
+        if [ $? -eq 0 ] && [ -s "$out" ]; then
+            log "✔ $desc 经镜像 ${P} 下载完成: $(wc -c < "$out") 字节"
             return 0
         fi
     done
+
+    log "✖ $desc 下载失败: $url"
     return 1
 }
 
-[ -n "$SHA_URL" ] && download_file "$SHA_URL" "$TMP_SHA" "校验清单 (sha256sums)"
+download_file "$DOWNLOAD_URL" "$TMP_BIN" "系统固件镜像" || die "固件下载失败"
 
-download_file "$DOWNLOAD_URL" "$TMP_BIN" "系统固件镜像 (请勿断电)"
-if [ $? -ne 0 ] || [ ! -s "$TMP_BIN" ]; then
-    log "❌ 固件下载失败，直连及所有加速通道均不可达，请检查网络！"
-    rm -f "$TMP_BIN" "$TMP_SHA"
-    exit 1
-fi
+IMG_KB=$(( ($(wc -c < "$TMP_BIN") + 1023) / 1024 ))
+log "镜像大小: ${IMG_KB} KiB"
+[ $((IMG_KB + HEADROOM_KB)) -le "$AVAIL_KB" ] \
+    || die "/tmp 空间不足：镜像 ${IMG_KB}KiB + 余量 ${HEADROOM_KB}KiB > 可用 ${AVAIL_KB}KiB"
 
-BIN_SIZE=$(ls -lh "$TMP_BIN" | awk '{print $5}')
-log "✔ 固件下载成功，文件大小: $BIN_SIZE"
-echo "" >> "$LOG_FILE"
-
-if [ -s "$TMP_SHA" ]; then
-    log "正在进行 SHA256 完整性比对..."
-    BIN_NAME=$(basename "$DOWNLOAD_URL")
-    EXPECTED_HASH=$(grep "$BIN_NAME" "$TMP_SHA" | awk '{print $1}')
-    if [ -n "$EXPECTED_HASH" ]; then
-        ACTUAL_HASH=$(sha256sum "$TMP_BIN" | awk '{print $1}')
-        if [ "$EXPECTED_HASH" != "$ACTUAL_HASH" ]; then
-            log "❌ 校验失败: 固件哈希不匹配！"
-            rm -f "$TMP_BIN" "$TMP_SHA"
-            exit 1
-        fi
-        log "✔ SHA256 哈希校验完全一致 ($ACTUAL_HASH)"
+# ---------- 4. SHA256 校验 ----------
+FNAME=$(basename "$DOWNLOAD_URL")
+if [ -n "$SHA_URL" ] && download_file "$SHA_URL" "$TMP_SHA" "校验清单"; then
+    WANT=$(awk -v f="$FNAME" '$2 == f || $2 == "*" f {print $1; exit}' "$TMP_SHA")
+    if command -v sha256sum >/dev/null 2>&1; then
+        GOT=$(sha256sum "$TMP_BIN" | awk '{print $1}')
+    else
+        GOT=$(busybox sha256sum "$TMP_BIN" | awk '{print $1}')
     fi
-fi
-
-if command -v fwtool >/dev/null 2>&1; then
-    if ! fwtool -q -i /dev/null "$TMP_BIN" 2>/dev/null; then
-        log "❌ 固件 Header 校验不通过，非合法 OpenWrt 固件！已终止。"
-        rm -f "$TMP_BIN" "$TMP_SHA"
-        exit 1
+    if [ -z "$WANT" ]; then
+        log "⚠ sha256sums 中没有 $FNAME，跳过哈希校验"
+    elif [ "$WANT" != "$GOT" ]; then
+        rm -f "$TMP_BIN"
+        die "SHA256 校验失败：期望 $WANT，实际 $GOT"
+    else
+        log "✔ SHA256 校验通过"
     fi
+else
+    log "⚠ 未能获取 sha256sums，跳过哈希校验"
 fi
 
-log "✔ 安全校验通过！即将以【$MODE_DESC】模式在 3 秒后写入并重启..."
-log "=========================================="
+# ---------- 5. 镜像合规性校验 ----------
+tar -tf "$TMP_BIN" >/dev/null 2>&1 || die "镜像不是合法的 tar 包，已中止"
+sysupgrade -T "$TMP_BIN" >>"$LOG_FILE" 2>&1 \
+    || die "sysupgrade -T 预检失败：镜像与本机不匹配或已损坏"
+log "✔ 镜像预检通过"
 
+# ---------- 6. 提交升级 ----------
 /etc/init.d/openclash stop 2>/dev/null || true
 sync
-echo 3 > /proc/sys/vm/drop_caches
-
-( sleep 3 && sysupgrade $UPGRADE_OPTS "$TMP_BIN" ) >/dev/null 2>&1 &
+if command -v nohup >/dev/null 2>&1; then
+    nohup sh -c 'sleep 3; exec sysupgrade "$@"' _ $UPGRADE_OPTS "$TMP_BIN" >/dev/null 2>&1 &
+else
+    ( sleep 3 && sysupgrade $UPGRADE_OPTS "$TMP_BIN" ) >/dev/null 2>&1 &
+fi
+log "✔ 已提交升级任务，设备即将重启（日志: $LOG_FILE）"
 exit 0
 EOF
-chmod +x package/base-files/files/usr/bin/auto-update-firmware.sh || true
-
-mkdir -p package/base-files/files/usr/share/luci/menu.d package/base-files/files/usr/share/rpcd/acl.d package/base-files/files/www/luci-static/resources/view/autoupdate || true
-cat << 'EOF' > package/base-files/files/usr/share/luci/menu.d/luci-app-autoupdate.json
-{
-	"admin/autoupdate": {
-		"title": "固件升级",
-		"order": 90,
-		"action": {
-			"type": "view",
-			"path": "autoupdate/index"
-		}
-	}
-}
-EOF
-
-cat << 'EOF' > package/base-files/files/usr/share/rpcd/acl.d/luci-app-autoupdate.json
-{
-	"luci-app-autoupdate": {
-		"description": "Grant access to autoupdate procedures",
-		"read": {
-			"file": {
-				"/tmp/firmware_update.log": [ "read" ]
-			}
-		},
-		"write": {
-			"file": {
-				"/usr/bin/auto-update-firmware.sh": [ "exec" ],
-				"/bin/sh": [ "exec" ]
-			}
-		}
-	}
-}
-EOF
-
-cat << 'EOF' > package/base-files/files/www/luci-static/resources/view/autoupdate/index.js
-'use strict';
-'require view';
-'require fs';
-'require ui';
-
-return view.extend({
-	load: function() {
-		return Promise.all([
-			fs.read_direct('/tmp/firmware_update.log').catch(function() { return ''; }),
-			fs.lines('/etc/openwrt_release').catch(function() { return []; })
-		]);
-	},
-
-	render: function(data) {
-		var logText = data[0] || '等待操作：请选择升级模式并点击下方按钮开始同步最新构建...';
-
-		var styleNode = E('style', {}, [
-			'@keyframes pulse-bar { 0% { background-position: 0% 50%; } 50% { background-position: 100% 50%; } 100% { background-position: 0% 50%; } }',
-			'@keyframes blink-dot { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: 0.4; transform: scale(0.85); } }',
-			'.ota-progress-container { width: 100%; background: #222; border-radius: 8px; height: 12px; overflow: hidden; margin: 15px 0; display: none; border: 1px solid #444; }',
-			'.ota-progress-bar { width: 100%; height: 100%; background: linear-gradient(90deg, #00c6ff, #0072ff, #00ff87, #60efff); background-size: 300% 300%; animation: pulse-bar 2s ease infinite; }',
-			'.ota-badge { display: inline-flex; align-items: center; padding: 4px 10px; border-radius: 20px; font-size: 12px; margin-right: 10px; background: #2a2a2a; color: #eaeaea; border: 1px solid #444; }',
-			'.ota-dot { width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }',
-			'.ota-dot.active { animation: blink-dot 1s infinite; }',
-			'.dot-idle { background: #888; }',
-			'.dot-down { background: #00b4d8; }',
-			'.dot-check { background: #ffb703; }',
-			'.dot-flash { background: #ef233c; }',
-			'.keep-config-box { display: flex; align-items: center; gap: 8px; padding: 10px 14px; border-radius: 10px; background: rgba(0, 180, 216, 0.08); border: 1px solid rgba(0, 180, 216, 0.3); margin-bottom: 15px; width: fit-content; }'
-		]);
-
-		var progressBar = E('div', { 'class': 'ota-progress-container', 'id': 'ota_progress' }, [
-			E('div', { 'class': 'ota-progress-bar' })
-		]);
-
-		var statusBadges = E('div', { 'style': 'margin-bottom: 12px; display: flex; flex-wrap: wrap; gap: 8px;' }, [
-			E('span', { 'class': 'ota-badge', 'id': 'badge_status' }, [
-				E('span', { 'class': 'ota-dot dot-idle', 'id': 'dot_status' }),
-				E('span', { 'id': 'text_status' }, _('待机中'))
-			]),
-			E('span', { 'class': 'ota-badge' }, [
-				E('strong', { 'style': 'color: #00ff87;' }, 'MT7981B'),
-				' (512MB / mod-490)'
-			])
-		]);
-
-		var keepConfigCheckbox = E('input', {
-			'type': 'checkbox',
-			'id': 'chk_keep_config',
-			'checked': 'checked',
-			'style': 'width: 16px; height: 16px; cursor: pointer;',
-			'change': function(ev) {
-				var hint = document.getElementById('keep_config_hint');
-				if (ev.target.checked) {
-					hint.innerText = '（推荐：保留拨号、无线密码及备份名单内的插件设置）';
-					hint.style.color = '';
-				} else {
-					hint.innerText = '（⚠️ 警告：将清空所有个人数据并恢复出厂设置，适合大版本跨度更新）';
-					hint.style.color = '#ef233c';
-				}
-			}
-		});
-
-		var viewDOM = E('div', { 'class': 'cbi-map' }, [
-			styleNode,
-			E('h2', {}, _('在线固件升级')),
-			E('div', { 'class': 'cbi-map-descr' }, _('一键拉取 AA9skillz-BN/tr3000-512-25 仓库最新 Release 固件，支持国内镜像智能故障转移与刷机模式自由切换。')),
-			E('div', { 'class': 'cbi-section' }, [
-				E('h3', {}, _('升级控制台')),
-				E('div', { 'class': 'cbi-section-node' }, [
-					statusBadges,
-					E('div', { 'class': 'keep-config-box' }, [
-						keepConfigCheckbox,
-						E('label', { 'for': 'chk_keep_config', 'style': 'font-weight: 600; cursor: pointer; user-select: none;' }, _('保留当前系统配置')),
-						E('span', { 'id': 'keep_config_hint', 'style': 'font-size: 12px; opacity: 0.8;' }, _('（推荐：保留拨号、无线密码及备份名单内的插件设置）'))
-					]),
-					E('div', { 'style': 'margin-bottom: 15px;' }, [
-						E('button', {
-							'id': 'btn_start_update',
-							'class': 'cbi-button cbi-button-action important',
-							'click': function(ev) {
-								var keep = document.getElementById('chk_keep_config').checked;
-								if (!keep && !window.confirm('⚠️ 确定要【不保留配置】升级吗？\n\n这将会抹除路由器上所有的个人配置，恢复到初始出厂状态！')) {
-									return;
-								}
-								ev.target.disabled = true;
-								document.getElementById('chk_keep_config').disabled = true;
-								document.getElementById('ota_progress').style.display = 'block';
-								
-								var dot = document.getElementById('dot_status');
-								var txt = document.getElementById('text_status');
-								dot.className = 'ota-dot dot-down active';
-								txt.innerText = keep ? '正在拉取固件 (保留配置模式)...' : '正在拉取固件 (全新恢复出厂模式)...';
-
-								var cmd = keep ? '/usr/bin/auto-update-firmware.sh >/dev/null 2>&1 &' : '/usr/bin/auto-update-firmware.sh -n >/dev/null 2>&1 &';
-								fs.exec('/bin/sh', ['-c', cmd]);
-
-								var poll = window.setInterval(function() {
-									var logArea = document.getElementById('update_log_area');
-									if (!logArea) { window.clearInterval(poll); return; }
-									fs.read_direct('/tmp/firmware_update.log').then(function(res) {
-										if (res) {
-											logArea.value = res;
-											logArea.scrollTop = logArea.scrollHeight;
-											if (res.indexOf('加速镜像') !== -1) txt.innerText = '已切换国内加速通道下载中...';
-											if (res.indexOf('SHA256 完整性比对') !== -1) {
-												dot.className = 'ota-dot dot-check active';
-												txt.innerText = '正在校验固件哈希一致性...';
-											}
-											if (res.indexOf('安全校验通过') !== -1) {
-												dot.className = 'ota-dot dot-flash active';
-												txt.innerText = '⚠️ 正在刷入闪存并重启，请勿断电！';
-												document.getElementById('btn_start_update').innerText = '正在写入闪存中...';
-											}
-											if (res.indexOf('❌') !== -1) {
-												dot.className = 'ota-dot dot-flash';
-												txt.innerText = '升级失败，已安全终止';
-												document.getElementById('ota_progress').style.display = 'none';
-												document.getElementById('btn_start_update').disabled = false;
-												document.getElementById('chk_keep_config').disabled = false;
-												window.clearInterval(poll);
-											}
-										}
-									});
-								}, 1200);
-							}
-						}, _('⚡ 立即拉取并在线升级'))
-					]),
-					progressBar,
-					E('textarea', {
-						'id': 'update_log_area',
-						'class': 'cbi-input-textarea',
-						'style': 'width: 100%; height: 280px; font-family: monospace; background: #121212; color: #00ff87; padding: 12px; border-radius: 6px; border: 1px solid #333; line-height: 1.4;',
-						'readonly': 'readonly'
-					}, logText)
-				])
-			])
-		]);
-		return viewDOM;
-	},
-	handleSaveApply: null,
-	handleSave: null,
-	handleReset: null
-});
-EOF
+chmod +x package/base-files/files/usr/bin/auto-update-firmware.sh
 
 # ==============================================================================
-# 6. 部署 F50 防限速 TTL=65 (覆盖 eth1/eth2/usb0) 与 USB 总线智能热插拔
+# 5. F50 防限速 TTL=65 与 USB 总线热插拔
 # ==============================================================================
-mkdir -p package/base-files/files/usr/share/nftables.d/table-post package/base-files/files/etc/hotplug.d/net || true
+mkdir -p package/base-files/files/usr/share/nftables.d/table-post package/base-files/files/etc/hotplug.d/net
 cat << 'EOF' > package/base-files/files/usr/share/nftables.d/table-post/99-f50-ttl.nft
 chain f50_ttl {
     type filter hook postrouting priority 300; policy accept;
@@ -369,105 +232,219 @@ chain f50_ttl {
 EOF
 
 cat << 'EOF' > package/base-files/files/etc/hotplug.d/net/99-f50-auto
-case "$ACTION" in
-    add)
-        if readlink -f "/sys/class/net/$INTERFACE/device" 2>/dev/null | grep -q "usb" || [ "$INTERFACE" = "usb0" ] || [ "$INTERFACE" = "eth1" ] || [ "$INTERFACE" = "eth2" ]; then
-            [ "$(uci -q get network.f50)" != "interface" ] && uci set network.f50=interface && uci set network.f50.proto='dhcp' && uci set network.f50.metric='20' && uci set network.f50.mtu='1420'
-            if [ "$(uci -q get network.f50.device)" != "$INTERFACE" ]; then
-                uci set network.f50.device="$INTERFACE"
-                uci commit network
-                /etc/init.d/network reload
-            fi
-            ( sleep 2 && ifup f50 ) >/dev/null 2>&1 &
-        fi
+#!/bin/sh
+# F50 5G USB 网卡自动绑定。
+# 只认真正从 USB 总线枚举出来的网卡（用 sysfs device 路径判断），
+# 不再按 eth1/eth2 这类名字硬匹配 —— 否则插一根网线就会把物理 LAN/WAN 口
+# 改写成 5G WAN，直接破坏有线网络。
+
+[ "$ACTION" = "add" ] || exit 0
+
+DEVPATH=$(readlink -f "/sys/class/net/$INTERFACE/device" 2>/dev/null)
+case "$DEVPATH" in
+    *usb*) ;;
+    *)
+        # 少数 RNDIS/CDC 驱动的 device 链接里不含 "usb" 字样，退一步只认 usb* 命名；
+        # eth* / wan / lan 一律不碰，避免插网线时把物理网口抢去当 5G WAN。
+        case "$INTERFACE" in
+            usb*) ;;
+            *) exit 0 ;;
+        esac
         ;;
 esac
+
+CHANGED=0
+[ "$(uci -q get network.f50)" != "interface" ] && { uci set network.f50=interface; CHANGED=1; }
+[ "$(uci -q get network.f50.proto)" != "dhcp" ] && { uci set network.f50.proto='dhcp'; CHANGED=1; }
+[ "$(uci -q get network.f50.metric)" != "20" ] && { uci set network.f50.metric='20'; CHANGED=1; }
+[ "$(uci -q get network.f50.mtu)" != "1420" ] && { uci set network.f50.mtu='1420'; CHANGED=1; }
+if [ "$(uci -q get network.f50.device)" != "$INTERFACE" ]; then
+    uci set network.f50.device="$INTERFACE"
+    CHANGED=1
+fi
+
+# 之前这里只在 device 变化时才 commit，其余 uci set 会丢失
+if [ "$CHANGED" = "1" ]; then
+    uci commit network
+    logger -t f50-hotplug "绑定 $INTERFACE 到 network.f50 并重载网络"
+    /etc/init.d/network reload
+fi
+exit 0
 EOF
-chmod +x package/base-files/files/etc/hotplug.d/net/99-f50-auto || true
+chmod +x package/base-files/files/etc/hotplug.d/net/99-f50-auto
 
 cat << 'EOF' > package/base-files/files/usr/bin/f50-watchdog.sh
 #!/bin/sh
+# F50 蜂窝链路看门狗（cron 每 3 分钟）
+#   1) 接口不存在 -> 直接退出（modem 被拔掉时不要误重连/误重启）
+#   2) 接口存在但 operstate 不是 up -> 重连
+#   3) 连续探测失败 -> 先重连；REBOOT_AFTER 次后重启（默认关闭，见下方说明）
+#
+# 注意：ifup 对已经 up 的接口是空操作，救不回卡死的 DHCP 租约，
+# 所以这里一律先 ifdown 再 ifup。
+
+# 需要自动重启兜底时，创建 /etc/f50-watchdog.conf 并写入： REBOOT_AFTER=6
+REBOOT_AFTER=0
+[ -f /etc/f50-watchdog.conf ] && . /etc/f50-watchdog.conf
+
 DEV=$(uci -q get network.f50.device)
-[ -z "$DEV" ] && exit 0
-ip link show "$DEV" 2>/dev/null | grep -q "UP" || exit 0
-GATEWAY_IP=$(ip route show default dev "$DEV" 2>/dev/null | awk '/via/ {print $3}' | head -n 1)
-[ -n "$GATEWAY_IP" ] && ! ping -c 2 -W 1 "$GATEWAY_IP" >/dev/null 2>&1 && ifup f50 && exit 0
-! ping -c 3 -W 2 -I "$DEV" "223.5.5.5" >/dev/null 2>&1 && ifup f50
+[ -n "$DEV" ] || exit 0
+[ -d "/sys/class/net/$DEV" ] || exit 0
+
+STATE=/tmp/.f50_watchdog_fails
+TARGET="${F50_PING_TARGET:-223.5.5.5}"
+
+reconnect() {
+    logger -t f50-watchdog "重连 network.f50 ($DEV)"
+    ifdown f50 2>/dev/null
+    sleep 3
+    ifup f50 2>/dev/null
+}
+
+OPER=$(cat "/sys/class/net/$DEV/operstate" 2>/dev/null)
+if [ "$OPER" != "up" ]; then
+    logger -t f50-watchdog "$DEV 链路状态 '${OPER:-unknown}'，执行重连"
+    reconnect
+    exit 0
+fi
+
+if ping -c 3 -W 2 -I "$DEV" "$TARGET" >/dev/null 2>&1; then
+    rm -f "$STATE"
+    exit 0
+fi
+
+FAILS=$(cat "$STATE" 2>/dev/null || echo 0)
+case "$FAILS" in ''|*[!0-9]*) FAILS=0 ;; esac
+FAILS=$((FAILS + 1))
+echo "$FAILS" > "$STATE"
+logger -t f50-watchdog "$DEV 探测 $TARGET 失败（连续 ${FAILS} 次）"
+
+reconnect
+
+if [ "${REBOOT_AFTER:-0}" -gt 0 ] 2>/dev/null && [ "$FAILS" -ge "$REBOOT_AFTER" ]; then
+    logger -t f50-watchdog "连续 ${FAILS} 次重连无效，重启设备"
+    rm -f "$STATE"
+    sync
+    reboot
+fi
 exit 0
 EOF
-chmod +x package/base-files/files/usr/bin/f50-watchdog.sh || true
+chmod +x package/base-files/files/usr/bin/f50-watchdog.sh
 
 # ==============================================================================
-# 7. 预置 OpenClash 最新 ARM64 Meta 内核 (软链接防冲突)
+# 6. 预置 OpenClash 最新 ARM64 Meta 内核（带完整性校验）
 # ==============================================================================
 OC_ROOT="package/luci-app-openclash/root/etc/openclash"
-[ ! -d "$OC_ROOT" ] && OC_ROOT="package/base-files/files/etc/openclash"
+if [ ! -d "$OC_ROOT" ]; then
+    OC_ROOT="package/base-files/files/etc/openclash"
+fi
 CORE_DIR="$OC_ROOT/core"
 mkdir -p "$CORE_DIR"
 
 META_URL="https://raw.githubusercontent.com/vernesong/OpenClash/core/master/meta/clash-linux-arm64.tar.gz"
-if curl -sL --connect-timeout 15 --retry 3 "$META_URL" -o /tmp/clash_meta.tar.gz; then
-    tar -zxf /tmp/clash_meta.tar.gz -C "$CORE_DIR"
-    mv -f "$CORE_DIR/clash" "$CORE_DIR/clash_meta" 2>/dev/null || true
-    ln -sf clash_meta "$CORE_DIR/clash"
+if curl -fsSL --connect-timeout 15 --retry 3 "$META_URL" -o /tmp/clash_meta.tar.gz 2>/dev/null \
+   && tar -tzf /tmp/clash_meta.tar.gz >/dev/null 2>&1 \
+   && tar -zxf /tmp/clash_meta.tar.gz -C "$CORE_DIR" \
+   && [ -s "$CORE_DIR/clash" ]; then
+    mv -f "$CORE_DIR/clash" "$CORE_DIR/clash_meta"
     chmod 0755 "$CORE_DIR/clash_meta"
-    rm -f /tmp/clash_meta.tar.gz
-    echo "✔ OpenClash Meta 内核预置成功！"
+    ln -sf clash_meta "$CORE_DIR/clash"
+    echo "✔ OpenClash Meta 内核预置成功"
+else
+    echo "⚠ OpenClash Meta 内核预置失败，固件内将不带内核（首启脚本也不会锁定 Meta 内核）" >&2
 fi
+rm -f /tmp/clash_meta.tar.gz
 
-curl -sL --connect-timeout 15 --retry 2 "https://raw.githubusercontent.com/alecthw/mmdb_china_ip_list/release/lite/Country.mmdb" -o "$OC_ROOT/Country.mmdb" || true
-curl -sL --connect-timeout 15 --retry 2 "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geosite.dat" -o "$OC_ROOT/GeoSite.dat" || true
-curl -sL --connect-timeout 15 --retry 2 "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geoip.dat" -o "$OC_ROOT/GeoIP.dat" || true
+# 下载 Geo 数据，失败时删掉半截文件，避免 0 字节或 HTML 错误页被当成数据
+fetch_data() {
+    local url="$1"
+    local out="$2"
+    local desc="$3"
+    if curl -fsSL --connect-timeout 15 --retry 2 "$url" -o "$out" 2>/dev/null && [ -s "$out" ]; then
+        echo "✔ $desc 预置完成"
+    else
+        rm -f "$out"
+        echo "⚠ $desc 预置失败（首次启动 OpenClash 时需联网补全）" >&2
+    fi
+}
 
-mkdir -p package/base-files/files/etc || true
-grep -qxF '/etc/openclash/' package/base-files/files/etc/sysupgrade.conf 2>/dev/null || echo '/etc/openclash/' >> package/base-files/files/etc/sysupgrade.conf
+fetch_data "https://raw.githubusercontent.com/alecthw/mmdb_china_ip_list/release/lite/Country.mmdb" "$OC_ROOT/Country.mmdb" "Country.mmdb"
+fetch_data "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geosite.dat" "$OC_ROOT/GeoSite.dat" "GeoSite.dat"
+fetch_data "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geoip.dat" "$OC_ROOT/GeoIP.dat" "GeoIP.dat"
+
+mkdir -p package/base-files/files/etc
+grep -qxF '/etc/openclash/' package/base-files/files/etc/sysupgrade.conf 2>/dev/null \
+    || echo '/etc/openclash/' >> package/base-files/files/etc/sysupgrade.conf
 
 # ==============================================================================
-# 8. 统一开机初始化脚本 (修复 wireless 先生成机制、全中文锁定、5G 免雷达秒开)
+# 7. 统一开机初始化脚本（中文/主题/BBR/F50/Wi-Fi/OpenClash/看门狗）
 # ==============================================================================
-mkdir -p package/base-files/files/etc/uci-defaults || true
+mkdir -p package/base-files/files/etc/uci-defaults
 cat << 'EOF' > package/base-files/files/etc/uci-defaults/99-custom-init
-# 1. 强制锁定简体中文与 Aurora 主题
-uci set luci.main.lang='zh_cn'
+#!/bin/sh
+# 首次启动初始化（执行成功后 OpenWrt 会自动删除本文件）
+
+# 1. 简体中文 + Aurora 主题
+#    语言代码必须和固件里实际存在的 base.zh*.lmo 对上，写错就是整片英文。
+#    这里直接读翻译目录里的文件名反推，不写死。
+LANG_CODE=""
+for d in /usr/lib/lua/luci/i18n /usr/share/ucode/luci/i18n /usr/share/luci/i18n; do
+    [ -d "$d" ] || continue
+    BF=$(ls "$d" 2>/dev/null | grep -E '^base\.zh' | head -n 1)
+    [ -n "$BF" ] || continue
+    case "$BF" in
+        *zh_Hans*) LANG_CODE='zh_Hans' ;;
+        *zh_Hant*) LANG_CODE='zh_Hant' ;;
+        *)         LANG_CODE='zh_cn' ;;
+    esac
+    break
+done
+[ -n "$LANG_CODE" ] || LANG_CODE='zh_cn'
+uci set luci.main.lang="$LANG_CODE"
 if [ -d "/www/luci-static/aurora" ]; then
     uci set luci.themes.Aurora='/luci-static/aurora'
     uci set luci.main.mediaurlbase='/luci-static/aurora'
 fi
 uci commit luci
 
-# 2. 开启 Turbo ACC (BBR + 软硬 PPE 流量分载)
+# 2. Turbo ACC：只开 BBR，不开任何 flow offload
+#    原因：99-f50-ttl.nft 依赖每个包都经过 postrouting。硬件/软件 offload 生效后，
+#    已建连的包会绕过 netfilter，TTL 只在头几个包被改写，防限速随之失效。
+#    如果确定不需要 TTL 改写，把下面两行的 flow_offloading 改回 '1' 即可。
 if [ -f "/etc/config/turboacc" ]; then
-    uci set turboacc.config.sw_flow='1'
-    uci set turboacc.config.hw_flow='1'
     uci set turboacc.config.bbr_cca='1'
+    uci set turboacc.config.sw_flow='0'
+    uci set turboacc.config.hw_flow='0'
     uci commit turboacc
 fi
-uci set firewall.@defaults[0].flow_offloading='1'
-uci set firewall.@defaults[0].flow_offloading_hw='1'
+uci set firewall.@defaults[0].flow_offloading='0'
+uci set firewall.@defaults[0].flow_offloading_hw='0'
 
-# 3. F50 接口自动探测 USB 总线网卡 (兼容 eth1 / eth2 / usb0)
+# 3. F50 接口：优先选真正挂在 USB 总线上的网卡，找不到先用 usb0（之后由 hotplug 修正）
 uci set network.f50=interface
 uci set network.f50.proto='dhcp'
 uci set network.f50.metric='20'
 uci set network.f50.mtu='1420'
-USB_DEV=$(ls -l /sys/class/net/ 2>/dev/null | grep -i "usb" | awk '{print $9}' | head -n 1)
-if [ -n "$USB_DEV" ]; then
-    uci set network.f50.device="$USB_DEV"
-else
-    uci set network.f50.device='eth1'
-fi
+
+USB_DEV=""
+for IFACE_PATH in /sys/class/net/*; do
+    case "$(readlink -f "$IFACE_PATH/device" 2>/dev/null)" in
+        *usb*) USB_DEV=$(basename "$IFACE_PATH"); break ;;
+    esac
+done
+[ -n "$USB_DEV" ] || USB_DEV='usb0'
+uci set network.f50.device="$USB_DEV"
 uci commit network
 
-for i in $(seq 0 10); do
-    if [ "$(uci -q get firewall.@zone[$i].name)" = "wan" ]; then
-        uci del_list firewall.@zone[$i].network='f50' 2>/dev/null
-        uci add_list firewall.@zone[$i].network='f50'
-        break
-    fi
-done
+# 4. 把 f50 挂到 wan 防火墙区域（不再硬编码 0..10 的索引上限）
+ZONE_IDX=$(uci show firewall 2>/dev/null | sed -n "s/^firewall\.@zone\[\([0-9]\+\)\]\.name=['\"]\?wan['\"]\?$/\1/p" | head -n 1)
+if [ -n "$ZONE_IDX" ]; then
+    uci -q del_list "firewall.@zone[$ZONE_IDX].network=f50" 2>/dev/null
+    uci add_list "firewall.@zone[$ZONE_IDX].network=f50"
+fi
 uci commit firewall
 
-# 4. 时区与 NTP
+# 5. 时区与 NTP
 uci set system.@system[0].zonename='Asia/Shanghai'
 uci set system.@system[0].timezone='CST-8'
 uci -q delete system.ntp.server
@@ -475,24 +452,21 @@ uci add_list system.ntp.server='ntp.aliyun.com'
 uci add_list system.ntp.server='time1.cloud.tencent.com'
 uci commit system
 
-# 5. 核心修复：先强制调用 wifi config 生成 /etc/config/wireless，再修改配置防止落空！
-/sbin/wifi config 2>/dev/null || true
-
+# 6. Wi-Fi 6
 for r in radio0 radio1; do
+    [ -n "$(uci -q get wireless.$r)" ] || continue
     BAND=$(uci -q get wireless.$r.band)
+    uci set wireless.$r.country='US'
     uci set wireless.$r.cell_density='0'
     uci set wireless.$r.mu_beamformer='1'
     uci set wireless.$r.disabled='0'
     uci set wireless.default_$r.disabled='0'
     if [ "$BAND" = "5g" ]; then
-        # 默认使用 149 信道 + CN 监管域 + HE80 (高频非 DFS 信道，100% 零等待秒出信号，绝不触发 disabled 锁死)
-        uci set wireless.$r.country='CN'
-        uci set wireless.$r.channel='149'
-        uci set wireless.$r.htmode='HE80'
+        uci set wireless.$r.channel='36'
+        uci set wireless.$r.htmode='HE160'
         uci set wireless.default_$r.ssid='Cudy-TR3000-5G'
         uci set wireless.default_$r.disassoc_low_ack='0'
     elif [ "$BAND" = "2g" ]; then
-        uci set wireless.$r.country='CN'
         uci set wireless.$r.channel='6'
         uci set wireless.$r.htmode='HE40'
         uci set wireless.$r.noscan='1'
@@ -501,17 +475,16 @@ for r in radio0 radio1; do
     fi
 done
 uci commit wireless
-/sbin/wifi reload >/dev/null 2>&1 &
 
-# 6. OpenClash 默认锁定内置 Meta 内核
-if [ -f "/etc/config/openclash" ]; then
-    uci set openclash.config.core_version='linux-arm64'
+# 7. OpenClash：只有内置内核确实存在时才锁定 Meta 内核
+if [ -f "/etc/config/openclash" ] && [ -x /etc/openclash/core/clash_meta ]; then
     uci set openclash.config.enable_meta_core='1'
+    uci set openclash.config.core_version='linux-arm64'
     uci commit openclash
 fi
 chmod 0755 /etc/openclash/core/clash* 2>/dev/null || true
 
-# 7. 看门狗计划任务
+# 8. 看门狗计划任务
 CRON_JOB="*/3 * * * * /usr/bin/f50-watchdog.sh >/dev/null 2>&1"
 ( crontab -l 2>/dev/null | grep -v "f50-watchdog.sh"; echo "$CRON_JOB" ) | crontab -
 /etc/init.d/cron enable
@@ -520,52 +493,57 @@ CRON_JOB="*/3 * * * * /usr/bin/f50-watchdog.sh >/dev/null 2>&1"
 rm -rf /tmp/luci-indexcache* /tmp/luci-modulecache/* 2>/dev/null || true
 exit 0
 EOF
-chmod +x package/base-files/files/etc/uci-defaults/99-custom-init || true
+chmod +x package/base-files/files/etc/uci-defaults/99-custom-init
 
 # ==============================================================================
-# 9. 补齐 Turbo ACC 的 LuCI 菜单与 ACL 权限
+# 8. 中文语言包后缀自适应（防止整片回退英文）
+#    不同 LuCI 版本的语言包命名不一样：luci-i18n-base-zh-cn（老）/
+#    luci-i18n-base-zh_Hans（main 分支）。写错的那个会被 make defconfig
+#    静默丢弃 —— 固件里没有 base.zh*.lmo，整个后台就是英文。
+#    这里不看文档、直接按 feeds 目录里真实存在的包名改写 .config。
 # ==============================================================================
-mkdir -p package/base-files/files/usr/share/luci/menu.d package/base-files/files/usr/share/rpcd/acl.d || true
-cat << 'EOF' > package/base-files/files/usr/share/luci/menu.d/luci-app-turboacc.json
-{
-	"admin/network/turboacc": {
-		"title": "Turbo ACC 网络加速",
-		"order": 50,
-		"action": {
-			"type": "cbi",
-			"path": "turboacc"
-		}
-	}
-}
-EOF
+[ -f .config ] || die ".config 不存在（本脚本必须在 Load custom configuration 之后运行）"
 
-cat << 'EOF' > package/base-files/files/usr/share/rpcd/acl.d/luci-app-turboacc.json
-{
-	"luci-app-turboacc": {
-		"description": "Grant access to Turbo ACC configuration",
-		"read": { "uci": [ "turboacc", "network", "firewall" ] },
-		"write": { "uci": [ "turboacc", "network", "firewall" ] }
-	}
-}
-EOF
+I18N_SUFFIX=""
+for s in zh_Hans zh-cn zh_cn; do
+    if [ -e "package/feeds/luci/luci-i18n-base-$s" ]; then
+        I18N_SUFFIX="$s"
+        break
+    fi
+done
+[ -n "$I18N_SUFFIX" ] || die "luci feed 里找不到中文语言包（已试 zh_Hans / zh-cn / zh_cn），请检查 feeds 是否装全"
+
+# 把所有 luci-i18n-*-zh_xx 行统一改成 feeds 中实际存在的后缀
+sed -i -E "s/^(CONFIG_PACKAGE_luci-i18n-.+)-zh[-_](cn|CN|Hans|Hant)=y$/\1-${I18N_SUFFIX}=y/" .config
+grep -q "^CONFIG_PACKAGE_luci-i18n-base-${I18N_SUFFIX}=y" .config \
+    || echo "CONFIG_PACKAGE_luci-i18n-base-${I18N_SUFFIX}=y" >> .config
+
+echo "✔ 中文语言包后缀: $I18N_SUFFIX"
+
+# OpenClash 自带的中文目录是老命名 zh-cn；本版 LuCI 若用 zh_Hans 就补一份同内容，
+# 否则 OpenClash 页面会单独回退英文（目前机器上只见到 openclash.zh-cn.lmo）。
+if [ "$I18N_SUFFIX" = "zh_Hans" ]; then
+    for f in package/luci-app-openclash/root/usr/lib/lua/luci/i18n/*.zh-cn.lmo; do
+        [ -f "$f" ] || continue
+        cp -f "$f" "${f%.zh-cn.lmo}.zh_Hans.lmo"
+        echo "✔ 补齐 OpenClash 语言目录: $(basename "${f%.zh-cn.lmo}.zh_Hans.lmo")"
+    done
+fi
 
 # ==============================================================================
-# 10. 编译前强行向 .config 注入 LuCI 26.x 全套中文语言包与 wireless-regdb 监管库
+# 9. 产物自检：任何一项缺失都让构建直接失败
 # ==============================================================================
-cat << 'EOF' >> .config
-CONFIG_LUCI_LANG_zh_Hans=y
-CONFIG_PACKAGE_wireless-regdb=y
-CONFIG_PACKAGE_luci-i18n-base-zh-cn=y
-CONFIG_PACKAGE_luci-i18n-mod-admin-full-zh-cn=y
-CONFIG_PACKAGE_luci-i18n-mod-system-zh-cn=y
-CONFIG_PACKAGE_luci-i18n-mod-network-zh-cn=y
-CONFIG_PACKAGE_luci-i18n-mod-status-zh-cn=y
-CONFIG_PACKAGE_luci-i18n-firewall-zh-cn=y
-CONFIG_PACKAGE_luci-i18n-package-manager-zh-cn=y
-CONFIG_PACKAGE_luci-i18n-aurora-config-zh-cn=y
-CONFIG_PACKAGE_luci-i18n-turboacc-zh-cn=y
-CONFIG_PACKAGE_luci-i18n-upnp-zh-cn=y
-CONFIG_PACKAGE_luci-i18n-ttyd-zh-cn=y
-EOF
+[ -f package/luci-theme-aurora/Makefile ]      || die "luci-theme-aurora 未就绪（diy-part1 的 clone 可能失败）"
+[ -f package/luci-app-aurora-config/Makefile ] || die "luci-app-aurora-config 未就绪"
+[ -f package/luci-app-openclash/Makefile ]     || die "luci-app-openclash 未就绪"
+[ -x package/base-files/files/usr/bin/auto-update-firmware.sh ]        || die "OTA 脚本未生成"
+[ -x package/base-files/files/usr/bin/f50-watchdog.sh ]                || die "看门狗脚本未生成"
+[ -f package/base-files/files/etc/uci-defaults/99-custom-init ]        || die "首启脚本未生成"
+[ -f package/base-files/files/usr/share/nftables.d/table-post/99-f50-ttl.nft ] || die "TTL 规则未生成"
+grep -q 'DEVICE/cudy_tr3000-512mb-v1' "$FILOGIC_MK" || die "机型定义未注入"
+grep -q 'IMAGE_SIZE := 450000k' "$FILOGIC_MK"       || die "IMAGE_SIZE 未按 512MiB 实际可用容量设置"
+grep -q "${UBI_SIZE_512M}" "$ORIG_DTS"             || die "DTS 未扩容"
+grep -q "^CONFIG_PACKAGE_luci-i18n-base-.*=y" .config || die "中文语言包未写入 .config"
 
+echo "✔ [diy-part2] 全部定制项校验通过"
 exit 0
