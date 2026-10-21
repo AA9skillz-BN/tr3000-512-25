@@ -259,6 +259,43 @@ CRON_JOB="*/3 * * * * /usr/bin/f50-watchdog.sh >/dev/null 2>&1"
 
 /etc/init.d/rpcd restart 2>/dev/null || true
 rm -rf /tmp/luci-indexcache /tmp/luci-modulecache/ 2>/dev/null || true
+
+# ==============================================================================
+# 8. 强行补齐 Turbo ACC 的 LuCI 菜单入口与 ACL 权限 (防止后台菜单隐藏)
+# ==============================================================================
+mkdir -p package/base-files/files/usr/share/luci/menu.d || true
+cat << 'EOF' > package/base-files/files/usr/share/luci/menu.d/luci-app-turboacc.json
+{
+	"admin/network/turboacc": {
+		"title": "Turbo ACC 网络加速",
+		"order": 50,
+		"action": {
+			"type": "cbi",
+			"path": "turboacc"
+		},
+		"depends": {
+			"acl": [ "luci-app-turboacc" ],
+			"uci": { "turboacc": true }
+		}
+	}
+}
+EOF
+
+mkdir -p package/base-files/files/usr/share/rpcd/acl.d || true
+cat << 'EOF' > package/base-files/files/usr/share/rpcd/acl.d/luci-app-turboacc.json
+{
+	"luci-app-turboacc": {
+		"description": "Grant access to Turbo ACC configuration",
+		"read": {
+			"uci": [ "turboacc", "network", "firewall" ]
+		},
+		"write": {
+			"uci": [ "turboacc", "network", "firewall" ]
+		}
+	}
+}
+EOF
+
 exit 0
 EOF
 chmod +x package/base-files/files/etc/uci-defaults/99-custom-init || type
