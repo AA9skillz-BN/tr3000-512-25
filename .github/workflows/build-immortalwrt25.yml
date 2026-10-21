@@ -3,7 +3,6 @@ name: Build Cudy TR3000 Firmware
 on:
   repository_dispatch:
   schedule:
-    # 国际标准时间(UTC) 每周一 19:00 -> 即北京时间每周二凌晨 03:00 自动触发编译
     - cron: '0 19 * * 1'
   workflow_dispatch:
     inputs:
@@ -40,7 +39,6 @@ permissions:
   contents: write
 
 env:
-  FEEDS_CONF: Actions-OpenWrt/feeds.conf.default
   CONFIG_FILE: openwrt-mod/config/.config
   DIY_P1_SH: Actions-OpenWrt/diy-part1.sh
   DIY_P2_SH: Actions-OpenWrt/diy-part2.sh
@@ -70,7 +68,7 @@ jobs:
       run: |
         sudo rm -rf /etc/apt/sources.list.d/* /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
         sudo -E apt-get -qq update
-        sudo -E apt-get -qq install -y $(cat Actions-OpenWrt/depends.txt 2>/dev/null || echo "ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential bzip2 ccache cmake cpio curl device-tree-compiler fastjar flex gawk gettext gcc-multilib g++-multilib git gperf haveged help2man intltool libc6-dev-i386 libelf-dev libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev libreadline-dev libssl-dev libtool lrzsz mkisofs msmtp nano ninja-build p7zip p7zip-full patch pkgconf python3 python3-pip libpython3-dev qemu-utils rsync scons squashfs-tools subversion swig texinfo uglifyjs upx-ucl unzip vim wget xmlto xxd zlib1g-dev")
+        sudo -E apt-get -qq install -y ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential bzip2 ccache cmake cpio curl device-tree-compiler fastjar flex gawk gettext gcc-multilib g++-multilib git gperf haveged help2man intltool libc6-dev-i386 libelf-dev libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev libreadline-dev libssl-dev libtool lrzsz mkisofs msmtp nano ninja-build p7zip p7zip-full patch pkgconf python3 python3-pip libpython3-dev qemu-utils rsync scons squashfs-tools subversion swig texinfo uglifyjs upx-ucl unzip vim wget xmlto xxd zlib1g-dev
         sudo -E apt-get -qq autoremove --purge
         sudo -E apt-get -qq clean
         sudo timedatectl set-timezone "$TZ"
@@ -84,16 +82,12 @@ jobs:
         BRANCH="${{ github.event.inputs.repo_branch || 'owrt' }}"
         
         if [ "$REPO_PATH" = "immortalwrt/immortalwrt" ] && [ "$BRANCH" = "owrt" ]; then
-            echo "检测到选择官方源但分支仍为 owrt，自动纠正分支为 master"
             BRANCH="master"
-        fi
-        if [ "$REPO_PATH" = "VIKINGYFY/immortalwrt" ] && [ "$BRANCH" = "master" ]; then
-            echo "检测到选择 VIKINGYFY 源但分支为 master，自动纠正分支为 owrt"
+        elif [ "$REPO_PATH" = "VIKINGYFY/immortalwrt" ] && [ "$BRANCH" = "master" ]; then
             BRANCH="owrt"
         fi
 
         FULL_URL="https://github.com/${REPO_PATH}.git"
-        echo "正在克隆源码仓库: $FULL_URL (分支: $BRANCH)"
         git clone "$FULL_URL" -b "$BRANCH" openwrt
         ln -sf /workdir/openwrt $GITHUB_WORKSPACE/openwrt
         
@@ -102,16 +96,15 @@ jobs:
 
     - name: Load custom feeds
       run: |
-        [ -e "$FEEDS_CONF" ] && cp "$FEEDS_CONF" openwrt/feeds.conf.default
         chmod +x $DIY_P1_SH
         cd openwrt
         $GITHUB_WORKSPACE/$DIY_P1_SH || true
 
-    - name: Update feeds
-      run: cd openwrt && ./scripts/feeds update -a
-
-    - name: Install feeds
-      run: cd openwrt && ./scripts/feeds install -a
+    - name: Update and Install feeds
+      run: |
+        cd openwrt
+        ./scripts/feeds update -a
+        ./scripts/feeds install -a
 
     - name: Load custom configuration
       run: |
@@ -119,18 +112,9 @@ jobs:
         if [ -f "$CONFIG_FILE" ]; then
             echo "✔ 成功加载配置文件: $CONFIG_FILE"
             cp -f "$CONFIG_FILE" openwrt/.config
-        elif [ -f "openwrt-mod/.config" ]; then
-            echo "✔ 成功加载配置文件: openwrt-mod/.config"
-            cp -f "openwrt-mod/.config" openwrt/.config
-        elif [ -f ".config" ]; then
-            echo "✔ 成功加载配置文件: .config"
-            cp -f ".config" openwrt/.config
         else
             FOUND_CFG=$(find . -maxdepth 3 -name ".config" | head -n 1)
-            if [ -n "$FOUND_CFG" ]; then
-                echo "✔ 自动搜索并加载配置文件: $FOUND_CFG"
-                cp -f "$FOUND_CFG" openwrt/.config
-            fi
+            [ -n "$FOUND_CFG" ] && cp -f "$FOUND_CFG" openwrt/.config
         fi
 
         chmod +x $DIY_P2_SH
@@ -138,7 +122,6 @@ jobs:
         $GITHUB_WORKSPACE/$DIY_P2_SH || true
 
         if [ -n "$EXTRA_CFG" ]; then
-            echo "正在追加临时自定义配置..."
             printf "\n# --- User Extra Config ---\n%s\n" "$EXTRA_CFG" >> .config
         fi
       env:
@@ -148,32 +131,12 @@ jobs:
       id: package
       run: |
         cd openwrt
-        sed -i 's/CONFIG_TARGET_mediatek_filogic_DEVICE_.*=y/CONFIG_TARGET_mediatek_filogic_DEVICE_cudy_tr3000-512mb-v1=y/g' .config 2>/dev/null || true
-        echo "CONFIG_TARGET_mediatek=y" >> .config
-        echo "CONFIG_TARGET_mediatek_filogic=y" >> .config
-        echo "CONFIG_TARGET_mediatek_filogic_DEVICE_cudy_tr3000-512mb-v1=y" >> .config
-
-        echo "CONFIG_PACKAGE_kmod-mac80211=y" >> .config
-        echo "CONFIG_PACKAGE_kmod-mt76-core=y" >> .config
-        echo "CONFIG_PACKAGE_kmod-mt76-connac=y" >> .config
-        echo "CONFIG_PACKAGE_kmod-mt7915e=y" >> .config
-        echo "CONFIG_PACKAGE_kmod-mt7981-firmware=y" >> .config
-        echo "CONFIG_PACKAGE_mt7981-wo-firmware=y" >> .config
-
-        # 强制锁死中文、Aurora 主题与 OpenClash 本体
-        echo "CONFIG_PACKAGE_luci-i18n-base-zh-cn=y" >> .config
-        echo "CONFIG_PACKAGE_luci-theme-aurora=y" >> .config
-        echo "CONFIG_PACKAGE_luci-app-aurora-config=y" >> .config
-        echo "CONFIG_PACKAGE_luci-i18n-aurora-config-zh-cn=y" >> .config
-        echo "CONFIG_PACKAGE_luci-app-openclash=y" >> .config
-
         make defconfig
 
         echo "DEVICE_NAME=_cudy_tr3000-512mb-v1" >> $GITHUB_ENV
         echo "FILE_DATE=_$(date +"%Y%m%d%H%M")" >> $GITHUB_ENV
 
         if [ "${{ github.event.inputs.only_config }}" = "true" ]; then
-            echo "✔ 仅校验 .config 模式已完成，跳过源码下载与固件编译。"
             mkdir -p /tmp/firmware_out
             cp -f .config /tmp/firmware_out/.config
             echo "FIRMWARE=/tmp/firmware_out" >> $GITHUB_ENV
@@ -182,7 +145,6 @@ jobs:
         fi
 
         make download -j8
-        find dl -size -1024c -exec ls -l {} \;
         find dl -size -1024c -exec rm -f {} \;
 
     - name: Compile the firmware
@@ -190,7 +152,6 @@ jobs:
       if: env.ONLY_CONFIG != 'true'
       run: |
         cd openwrt
-        echo -e "$(nproc) thread compile"
         make tools/compile -j$(nproc) || make tools/compile -j1 V=s
         make toolchain/compile -j$(nproc) || make toolchain/compile -j1 V=s
         make -j$(nproc) || make -j1 V=s
@@ -225,13 +186,14 @@ jobs:
       if: env.ONLY_CONFIG != 'true' && steps.compile.outputs.status == 'success' && !cancelled()
       run: |
         echo "release_tag=ImmortalWrt-$(date +"%Y.%m.%d-%H%M")" >> $GITHUB_OUTPUT
-        touch release.txt
-        echo "🚀 Cudy TR3000 (512MB Flash) 专属固件发布" >> release.txt
-        echo "--------------------------------------------------" >> release.txt
-        echo "• 源码仓库: ${{ env.ACTUAL_REPO }} (${{ env.ACTUAL_BRANCH }})" >> release.txt
-        echo "• 默认后台: 192.168.6.1" >> release.txt
-        echo "• 硬件分区: U-Boot 请选择 mod-490 布局" >> release.txt
-        echo "• 预置功能: Aurora 现代主题 / OpenClash (内置 Meta 内核) / 中兴 F50 5G 即插即用 / MTK PPE 硬件加速 / 双模式在线升级" >> release.txt
+        cat << 'EOF' > release.txt
+        🚀 Cudy TR3000 (512MB Flash) 专属固件发布
+        --------------------------------------------------
+        • 源码仓库: ${{ env.ACTUAL_REPO }} (${{ env.ACTUAL_BRANCH }})
+        • 默认后台: 192.168.6.1
+        • 硬件分区: U-Boot 请选择 mod-490 布局
+        • 预置功能: Aurora 现代主题 / OpenClash (内置 Meta 内核) / 中兴 F50 5G 即插即用 / MTK PPE 硬件加速 / 双模式在线升级
+        EOF
         echo "status=success" >> $GITHUB_OUTPUT
 
     - name: Upload firmware to release
