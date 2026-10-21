@@ -113,7 +113,7 @@ jobs:
             echo "✔ 成功加载配置文件: $CONFIG_FILE"
             cp -f "$CONFIG_FILE" openwrt/.config
         else
-            FOUND_CFG=$(find . -maxdepth 3 -name ".config" | head -n 1)
+            FOUND_CFG=$(find . -maxdepth 3 \( -name ".config" -o -name "*.config" \) | head -n 1)
             [ -n "$FOUND_CFG" ] && cp -f "$FOUND_CFG" openwrt/.config
         fi
 
@@ -132,6 +132,10 @@ jobs:
       run: |
         cd openwrt
         sed -i 's/CONFIG_TARGET_mediatek_filogic_DEVICE_.*=y/CONFIG_TARGET_mediatek_filogic_DEVICE_cudy_tr3000-512mb-v1=y/g' .config 2>/dev/null || true
+        echo "CONFIG_LUCI_LANG_zh_Hans=y" >> .config
+        make defconfig
+        # 二次锁定：把 defconfig 生成的所有 zh-cn 语言包可选项全部激活为 =y
+        sed -i 's/# CONFIG_PACKAGE_luci-i18n-\(.*\)-zh-cn is not set/CONFIG_PACKAGE_luci-i18n-\1-zh-cn=y/g' .config 2>/dev/null || true
         make defconfig
 
         echo "DEVICE_NAME=_cudy_tr3000-512mb-v1" >> $GITHUB_ENV
