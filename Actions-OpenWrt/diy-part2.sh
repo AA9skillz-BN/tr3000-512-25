@@ -219,17 +219,152 @@ exit 0
 EOF
 chmod +x package/base-files/files/usr/bin/auto-update-firmware.sh
 
+# --- 4.1 LuCI 前端：菜单 + ACL + 视图（系统 → 在线升级） ---
+mkdir -p package/base-files/files/usr/share/luci/menu.d \
+         package/base-files/files/usr/share/rpcd/acl.d \
+         package/base-files/files/www/luci-static/resources/view/autoupdate
+
+cat << 'EOF' > package/base-files/files/usr/share/luci/menu.d/luci-app-autoupdate.json
+{
+	"admin/system/autoupdate": {
+		"title": "在线升级",
+		"order": 91,
+		"action": {
+			"type": "view",
+			"path": "autoupdate/index"
+		},
+		"depends": {
+			"acl": [ "luci-app-autoupdate" ]
+		}
+	}
+}
+EOF
+
+cat << 'EOF' > package/base-files/files/usr/share/rpcd/acl.d/luci-app-autoupdate.json
+{
+	"luci-app-autoupdate": {
+		"description": "Grant access to online firmware upgrade",
+		"read": {
+			"file": {
+				"/tmp/firmware_update.log": [ "read" ]
+			}
+		},
+		"write": {
+			"file": {
+				"/usr/bin/auto-update-firmware.sh": [ "exec" ]
+			}
+		}
+	}
+}
+EOF
+
+cat << 'EOF' > package/base-files/files/www/luci-static/resources/view/autoupdate/index.js
+'use strict';
+'require view';
+'require fs';
+'require ui';
+'require poll';
+
+return view.extend({
+	load: function() {
+		return fs.read('/tmp/firmware_update.log').catch(function() { return ''; });
+	},
+
+	render: function(log) {
+		var logEl = E('pre', {
+			'id': 'ota_log',
+			'style': 'height:22rem;overflow:auto;white-space:pre-wrap;word-break:break-all;' +
+				'font-family:monospace;font-size:12px;padding:8px;border-radius:4px;margin:0;'
+		}, (typeof(log) === 'string') ? log : '');
+
+		function run(noConfig) {
+			var args = noConfig ? [ '-n' ] : [];
+			return fs.exec('/usr/bin/auto-update-firmware.sh', args).then(function(res) {
+				if (res.code !== 0)
+					throw new Error('脚本退出码 ' + res.code);
+				ui.addNotification(null,
+					E('p', {}, '已开始下载并校验，进度见下方日志。升级过程中请勿断电。'), 'info');
+			}).catch(function(e) {
+				ui.addNotification(null, E('p', {}, '启动失败：' + e.message), 'error');
+			});
+		}
+
+		poll.add(function() {
+			return fs.read('/tmp/firmware_update.log').then(function(data) {
+				if (typeof(data) === 'string') {
+					logEl.textContent = data;
+					logEl.scrollTop = logEl.scrollHeight;
+				}
+				return null;
+			}).catch(function() { return null; });
+		}, 3);
+
+		return E([], [
+			E('h2', {}, '在线升级'),
+			E('div', { 'class': 'cbi-section' }, [
+				E('p', {}, '从 GitHub Release 拉取最新固件，自动完成 SHA256 校验与 sysupgrade 合规性预检后再写入。'),
+				E('div', { 'class': 'cbi-section-node' }, [
+					E('button', {
+						'class': 'btn cbi-button cbi-button-apply',
+						'click': ui.createHandlerFn(this, function() {
+							if (!confirm('开始在线升级？过程中请勿断电。'))
+								return;
+							return run(false);
+						})
+					}, '⚡ 立即拉取并升级（保留配置）'),
+					' ',
+					E('button', {
+						'class': 'btn cbi-button cbi-button-reset',
+						'click': ui.createHandlerFn(this, function() {
+							if (!confirm('不保留配置升级，所有设置将被清除，确定继续？'))
+								return;
+							return run(true);
+						})
+					}, '不保留配置升级')
+				]),
+				E('h3', {}, '升级日志'),
+				logEl
+			])
+		]);
+	},
+
+	handleSaveApply: null,
+	handleSave: null,
+	handleReset: null
+});
+EOF
+
 # ==============================================================================
-# 5. F50 防限速 TTL=65 与 USB 总线热插拔
+# 5. F50 防限速 TTL=65 / 硬件加速 —— 二选一 + USB 总线热插拔
+#
+#    为什么必须二选一：开了 flow offload 后，已建连的包由 PPE 直接转发、
+#    不再经过 netfilter，postrouting 里的 TTL 改写只在每个流的头几个包生效，
+#    之后恢复原始 TTL(63)——同一个连接 TTL 忽 65 忽 63，比不改写更容易被识别。
+#
+#    F50_ACCEL=1  硬件加速优先，不生成 TTL 规则（CPU 占用低，运营商侧看到 TTL=63）
+#    F50_ACCEL=0  TTL 防限速优先，关闭 flow offload
+#
+#    参考：F50 走 USB 共享，实测上限 300~500Mbps，而 MT7981 纯软件转发可跑 1Gbps+，
+#    所以加速对吞吐基本没有提升，主要是降低 CPU 占用。
 # ==============================================================================
+F50_ACCEL=1
+
 mkdir -p package/base-files/files/usr/share/nftables.d/table-post package/base-files/files/etc/hotplug.d/net
-cat << 'EOF' > package/base-files/files/usr/share/nftables.d/table-post/99-f50-ttl.nft
+
+if [ "$F50_ACCEL" = "0" ]; then
+    cat << 'EOF' > package/base-files/files/usr/share/nftables.d/table-post/99-f50-ttl.nft
 chain f50_ttl {
     type filter hook postrouting priority 300; policy accept;
     oifname { "eth1", "eth2", "usb0" } ip ttl set 65
     oifname { "eth1", "eth2", "usb0" } ip6 hoplimit set 65
 }
 EOF
+    echo "✔ 模式: TTL=65 防限速（flow offload 关闭）"
+else
+    rm -f package/base-files/files/usr/share/nftables.d/table-post/99-f50-ttl.nft
+    : > package/base-files/files/etc/f50-accel
+    echo "✔ 模式: 硬件加速（不生成 TTL 规则，运营商侧看到 TTL=63）"
+fi
 
 cat << 'EOF' > package/base-files/files/etc/hotplug.d/net/99-f50-auto
 #!/bin/sh
@@ -420,18 +555,19 @@ if [ -d "/www/luci-static/aurora" ]; then
 fi
 uci commit luci
 
-# 2. Turbo ACC：只开 BBR，不开任何 flow offload
-#    原因：99-f50-ttl.nft 依赖每个包都经过 postrouting。硬件/软件 offload 生效后，
-#    已建连的包会绕过 netfilter，TTL 只在头几个包被改写，防限速随之失效。
-#    如果确定不需要 TTL 改写，把下面两行的 flow_offloading 改回 '1' 即可。
+# 2. 转发加速：由构建时的 F50_ACCEL 决定
+#    存在 /etc/f50-accel 就是"加速优先"模式（TTL 规则不会生成），否则 TTL 优先。
+if [ -f /etc/f50-accel ]; then
+    uci set firewall.@defaults[0].flow_offloading='1'
+    uci set firewall.@defaults[0].flow_offloading_hw='1'
+else
+    uci set firewall.@defaults[0].flow_offloading='0'
+    uci set firewall.@defaults[0].flow_offloading_hw='0'
+fi
 if [ -f "/etc/config/turboacc" ]; then
     uci set turboacc.config.bbr_cca='1'
-    uci set turboacc.config.sw_flow='0'
-    uci set turboacc.config.hw_flow='0'
     uci commit turboacc
 fi
-uci set firewall.@defaults[0].flow_offloading='0'
-uci set firewall.@defaults[0].flow_offloading_hw='0'
 
 # 3. F50 接口：优先选真正挂在 USB 总线上的网卡，找不到先用 usb0（之后由 hotplug 修正）
 uci set network.f50=interface
@@ -521,7 +657,18 @@ chmod +x package/base-files/files/etc/uci-defaults/99-custom-init
 [ -x package/base-files/files/usr/bin/auto-update-firmware.sh ]        || die "OTA 脚本未生成"
 [ -x package/base-files/files/usr/bin/f50-watchdog.sh ]                || die "看门狗脚本未生成"
 [ -f package/base-files/files/etc/uci-defaults/99-custom-init ]        || die "首启脚本未生成"
-[ -f package/base-files/files/usr/share/nftables.d/table-post/99-f50-ttl.nft ] || die "TTL 规则未生成"
+[ -f package/base-files/files/www/luci-static/resources/view/autoupdate/index.js ] || die "OTA 视图未生成"
+[ -f package/base-files/files/usr/share/luci/menu.d/luci-app-autoupdate.json ]     || die "OTA 菜单未生成"
+[ -f package/base-files/files/usr/share/rpcd/acl.d/luci-app-autoupdate.json ]      || die "OTA ACL 未生成"
+
+if [ "$F50_ACCEL" = "0" ]; then
+    [ -f package/base-files/files/usr/share/nftables.d/table-post/99-f50-ttl.nft ] || die "TTL 规则未生成"
+else
+    [ -f package/base-files/files/etc/f50-accel ] || die "加速模式标记文件未生成"
+    if [ -f package/base-files/files/usr/share/nftables.d/table-post/99-f50-ttl.nft ]; then
+        die "加速模式下不应存在 TTL 规则文件"
+    fi
+fi
 grep -q 'define Device/cudy_tr3000-512mb-v1' "$FILOGIC_MK" || die "机型定义未注入"
 grep -q 'IMAGE_SIZE := 450000k' "$FILOGIC_MK"       || die "IMAGE_SIZE 未按 512MiB 实际可用容量设置"
 grep -q "${UBI_SIZE_512M}" "$ORIG_DTS"             || die "DTS 未扩容"
