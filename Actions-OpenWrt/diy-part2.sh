@@ -347,7 +347,7 @@ EOF
 #    参考：F50 走 USB 共享，实测上限 300~500Mbps，而 MT7981 纯软件转发可跑 1Gbps+，
 #    所以加速对吞吐基本没有提升，主要是降低 CPU 占用。
 # ==============================================================================
-F50_ACCEL=1
+F50_ACCEL=0
 
 mkdir -p package/base-files/files/usr/share/nftables.d/table-post package/base-files/files/etc/hotplug.d/net
 
