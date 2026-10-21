@@ -366,6 +366,27 @@ else
     echo "✔ 模式: 硬件加速（不生成 TTL 规则，运营商侧看到 TTL=63）"
 fi
 
+# USB 自动休眠：必须关掉。
+# TR3000 + F50 实测：usbcore.autosuspend=2 时，模块空闲 2 秒即被挂起，
+# 唤醒失败后内核直接断开并重新枚举（dmesg 里 usb 1-1 / 2-1 每 5 秒交替一轮），
+# 网络完全不可用。关掉后连续 3 分钟零 USB 事件。
+mkdir -p package/base-files/files/etc/init.d package/base-files/files/etc/rc.d
+cat << 'EOF' > package/base-files/files/etc/init.d/usb-nosuspend
+#!/bin/sh /etc/rc.common
+# 关闭 USB runtime suspend，避免 5G 模块被挂起后无法唤醒
+START=20
+
+start() {
+	[ -w /sys/module/usbcore/parameters/autosuspend ] && \
+		echo -1 > /sys/module/usbcore/parameters/autosuspend
+	for f in /sys/bus/usb/devices/*/power/control; do
+		[ -w "$f" ] && echo on > "$f"
+	done
+}
+EOF
+chmod +x package/base-files/files/etc/init.d/usb-nosuspend
+ln -sf ../init.d/usb-nosuspend package/base-files/files/etc/rc.d/S20usb-nosuspend
+
 cat << 'EOF' > package/base-files/files/etc/hotplug.d/net/99-f50-auto
 #!/bin/sh
 # F50 5G USB 网卡自动绑定。
@@ -393,7 +414,12 @@ CHANGED=0
 [ "$(uci -q get network.f50.proto)" != "dhcp" ] && { uci set network.f50.proto='dhcp'; CHANGED=1; }
 [ "$(uci -q get network.f50.metric)" != "20" ] && { uci set network.f50.metric='20'; CHANGED=1; }
 [ "$(uci -q get network.f50.mtu)" != "1420" ] && { uci set network.f50.mtu='1420'; CHANGED=1; }
-if [ "$(uci -q get network.f50.device)" != "$INTERFACE" ]; then
+CUR_DEV=$(uci -q get network.f50.device)
+# 模组同时暴露多个网卡时，已绑定的那个还在就不要来回抢，避免网络反复 reload
+if [ -n "$CUR_DEV" ] && [ "$CUR_DEV" != "$INTERFACE" ] && [ -e "/sys/class/net/$CUR_DEV" ]; then
+    exit 0
+fi
+if [ "$CUR_DEV" != "$INTERFACE" ]; then
     uci set network.f50.device="$INTERFACE"
     CHANGED=1
 fi
@@ -654,6 +680,8 @@ chmod +x package/base-files/files/etc/uci-defaults/99-custom-init
 [ -f package/base-files/files/etc/uci-defaults/99-custom-init ]        || die "首启脚本未生成"
 [ -f package/base-files/files/www/luci-static/resources/view/autoupdate/index.js ] || die "OTA 视图未生成"
 [ -f package/base-files/files/usr/share/luci/menu.d/luci-app-autoupdate.json ]     || die "OTA 菜单未生成"
+[ -x package/base-files/files/etc/init.d/usb-nosuspend ]  || die "USB 禁止休眠脚本未生成"
+[ -e package/base-files/files/etc/rc.d/S20usb-nosuspend ] || die "USB 禁止休眠未挂到 rc.d"
 [ -f package/base-files/files/usr/share/rpcd/acl.d/luci-app-autoupdate.json ]      || die "OTA ACL 未生成"
 
 if [ "$F50_ACCEL" = "0" ]; then
