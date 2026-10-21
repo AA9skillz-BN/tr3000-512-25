@@ -401,6 +401,19 @@ for d in /usr/lib/lua/luci/i18n /usr/share/ucode/luci/i18n /usr/share/luci/i18n;
 done
 [ -n "$LANG_CODE" ] || LANG_CODE='zh_cn'
 uci set luci.main.lang="$LANG_CODE"
+
+# 第三方包（OpenClash）自带的语言目录用的是老命名 openclash.zh-cn.lmo；
+# 本版语言代码若不是 zh_cn，补一份同内容文件，否则 OpenClash 页面会单独回退英文。
+if [ "$LANG_CODE" != "zh_cn" ]; then
+    for d in /usr/lib/lua/luci/i18n /usr/share/ucode/luci/i18n /usr/share/luci/i18n; do
+        [ -d "$d" ] || continue
+        for f in "$d"/*.zh-cn.lmo; do
+            [ -f "$f" ] || continue
+            t="${f%.zh-cn.lmo}.$LANG_CODE.lmo"
+            [ -e "$t" ] || cp -f "$f" "$t"
+        done
+    done
+fi
 if [ -d "/www/luci-static/aurora" ]; then
     uci set luci.themes.Aurora='/luci-static/aurora'
     uci set luci.main.mediaurlbase='/luci-static/aurora'
@@ -495,43 +508,12 @@ exit 0
 EOF
 chmod +x package/base-files/files/etc/uci-defaults/99-custom-init
 
-# ==============================================================================
-# 8. 中文语言包后缀自适应（防止整片回退英文）
-#    不同 LuCI 版本的语言包命名不一样：luci-i18n-base-zh-cn（老）/
-#    luci-i18n-base-zh_Hans（main 分支）。写错的那个会被 make defconfig
-#    静默丢弃 —— 固件里没有 base.zh*.lmo，整个后台就是英文。
-#    这里不看文档、直接按 feeds 目录里真实存在的包名改写 .config。
-# ==============================================================================
-[ -f .config ] || die ".config 不存在（本脚本必须在 Load custom configuration 之后运行）"
-
-I18N_SUFFIX=""
-for s in zh_Hans zh-cn zh_cn; do
-    if [ -e "package/feeds/luci/luci-i18n-base-$s" ]; then
-        I18N_SUFFIX="$s"
-        break
-    fi
-done
-[ -n "$I18N_SUFFIX" ] || die "luci feed 里找不到中文语言包（已试 zh_Hans / zh-cn / zh_cn），请检查 feeds 是否装全"
-
-# 把所有 luci-i18n-*-zh_xx 行统一改成 feeds 中实际存在的后缀
-sed -i -E "s/^(CONFIG_PACKAGE_luci-i18n-.+)-zh[-_](cn|CN|Hans|Hant)=y$/\1-${I18N_SUFFIX}=y/" .config
-grep -q "^CONFIG_PACKAGE_luci-i18n-base-${I18N_SUFFIX}=y" .config \
-    || echo "CONFIG_PACKAGE_luci-i18n-base-${I18N_SUFFIX}=y" >> .config
-
-echo "✔ 中文语言包后缀: $I18N_SUFFIX"
-
-# OpenClash 自带的中文目录是老命名 zh-cn；本版 LuCI 若用 zh_Hans 就补一份同内容，
-# 否则 OpenClash 页面会单独回退英文（目前机器上只见到 openclash.zh-cn.lmo）。
-if [ "$I18N_SUFFIX" = "zh_Hans" ]; then
-    for f in package/luci-app-openclash/root/usr/lib/lua/luci/i18n/*.zh-cn.lmo; do
-        [ -f "$f" ] || continue
-        cp -f "$f" "${f%.zh-cn.lmo}.zh_Hans.lmo"
-        echo "✔ 补齐 OpenClash 语言目录: $(basename "${f%.zh-cn.lmo}.zh_Hans.lmo")"
-    done
-fi
+# 说明：中文语言包不在这里做路径探测（feeds 的安装布局因版本而异，探测容易误杀）。
+# .config 里把 -zh-cn / -zh_Hans 两种包名都列上，由 make defconfig 自己挑出真实存在
+# 的那个、丢掉另一个；真正的校验放在 workflow 的 defconfig 之后，并带诊断输出。
 
 # ==============================================================================
-# 9. 产物自检：任何一项缺失都让构建直接失败
+# 8. 产物自检：任何一项缺失都让构建直接失败
 # ==============================================================================
 [ -f package/luci-theme-aurora/Makefile ]      || die "luci-theme-aurora 未就绪（diy-part1 的 clone 可能失败）"
 [ -f package/luci-app-aurora-config/Makefile ] || die "luci-app-aurora-config 未就绪"
