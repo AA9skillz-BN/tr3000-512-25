@@ -143,7 +143,18 @@ jobs:
             echo "${DEVICE_CONFIG}=y" >> .config
         fi
 
+        cp -f .config /tmp/config.before
         make defconfig
+
+        # defconfig 会静默丢弃"feed 里没有 / 依赖不满足"的包，这里把差异列出来。
+        # 之前 luci-app-turboacc 就是这样消失的，而日志里一个字都没有。
+        grep -oE '^CONFIG_PACKAGE_[A-Za-z0-9_.+-]+=y' /tmp/config.before | sed 's/=y$//' | sort -u > /tmp/pkgs.want || true
+        grep -oE '^CONFIG_PACKAGE_[A-Za-z0-9_.+-]+=y' .config            | sed 's/=y$//' | sort -u > /tmp/pkgs.got  || true
+        DROPPED=$(comm -23 /tmp/pkgs.want /tmp/pkgs.got)
+        if [ -n "$DROPPED" ]; then
+            echo "::warning::以下包在 defconfig 后被丢弃（feed 无此包或依赖不满足）:"
+            echo "$DROPPED" | sed 's/^/    /'
+        fi
 
         # defconfig 对不存在的设备/软件包是"静默丢弃"，必须显式校验机型还在
         if ! grep -qx "${DEVICE_CONFIG}=y" .config; then
