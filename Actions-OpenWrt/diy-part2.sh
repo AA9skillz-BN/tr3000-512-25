@@ -427,8 +427,17 @@ fi
 # 之前这里只在 device 变化时才 commit，其余 uci set 会丢失
 if [ "$CHANGED" = "1" ]; then
     uci commit network
-    logger -t f50-hotplug "绑定 $INTERFACE 到 network.f50 并重载网络"
-    /etc/init.d/network reload
+
+    # 模组抖动时（例如供电不足导致每 10 秒重枚举一次）不要每次都 reload 网络，
+    # 否则 Wi-Fi 和 LAN 会被跟着带崩。60 秒内最多重载一次。
+    STAMP=/tmp/.f50_last_reload
+    NOW=$(date +%s)
+    LAST=$(cat "$STAMP" 2>/dev/null || echo 0)
+    if [ $((NOW - LAST)) -ge 60 ]; then
+        echo "$NOW" > "$STAMP"
+        logger -t f50-hotplug "绑定 $INTERFACE 到 network.f50 并重载网络"
+        /etc/init.d/network reload
+    fi
 fi
 exit 0
 EOF
@@ -455,7 +464,16 @@ DEV=$(uci -q get network.f50.device)
 STATE=/tmp/.f50_watchdog_fails
 TARGET="${F50_PING_TARGET:-223.5.5.5}"
 
+RECONNECT_STAMP=/tmp/.f50_last_reconnect
 reconnect() {
+    # 120 秒内已经重连过就不再折腾，避免模组反复重枚举时 cron 每 3 分钟补一刀
+    RC_NOW=$(date +%s)
+    RC_LAST=$(cat "$RECONNECT_STAMP" 2>/dev/null || echo 0)
+    if [ $((RC_NOW - RC_LAST)) -lt 120 ]; then
+        logger -t f50-watchdog "120 秒内刚重连过，跳过 ($DEV)"
+        return 0
+    fi
+    echo "$RC_NOW" > "$RECONNECT_STAMP"
     logger -t f50-watchdog "重连 network.f50 ($DEV)"
     ifdown f50 2>/dev/null
     sleep 3
