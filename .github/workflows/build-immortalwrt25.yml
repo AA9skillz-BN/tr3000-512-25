@@ -131,6 +131,7 @@ jobs:
       id: package
       run: |
         cd openwrt
+        sed -i 's/CONFIG_TARGET_mediatek_filogic_DEVICE_.*=y/CONFIG_TARGET_mediatek_filogic_DEVICE_cudy_tr3000-512mb-v1=y/g' .config 2>/dev/null || true
         make defconfig
 
         echo "DEVICE_NAME=_cudy_tr3000-512mb-v1" >> $GITHUB_ENV
@@ -186,14 +187,12 @@ jobs:
       if: env.ONLY_CONFIG != 'true' && steps.compile.outputs.status == 'success' && !cancelled()
       run: |
         echo "release_tag=ImmortalWrt-$(date +"%Y.%m.%d-%H%M")" >> $GITHUB_OUTPUT
-        cat << 'EOF' > release.txt
-        🚀 Cudy TR3000 (512MB Flash) 专属固件发布
-        --------------------------------------------------
-        • 源码仓库: ${{ env.ACTUAL_REPO }} (${{ env.ACTUAL_BRANCH }})
-        • 默认后台: 192.168.6.1
-        • 硬件分区: U-Boot 请选择 mod-490 布局
-        • 预置功能: Aurora 现代主题 / OpenClash (内置 Meta 内核) / 中兴 F50 5G 即插即用 / MTK PPE 硬件加速 / 双模式在线升级
-        EOF
+        echo "🚀 Cudy TR3000 (512MB Flash) 专属固件发布" > release.txt
+        echo "--------------------------------------------------" >> release.txt
+        echo "• 源码仓库: ${{ env.ACTUAL_REPO }} (${{ env.ACTUAL_BRANCH }})" >> release.txt
+        echo "• 默认后台: 192.168.6.1" >> release.txt
+        echo "• 硬件分区: U-Boot 请选择 mod-490 布局" >> release.txt
+        echo "• 预置功能: Aurora 现代主题 / OpenClash (内置 Meta 内核) / 中兴 F50 5G 即插即用 / MTK PPE 硬件加速 / 双模式在线升级" >> release.txt
         echo "status=success" >> $GITHUB_OUTPUT
 
     - name: Upload firmware to release
