@@ -133,7 +133,6 @@ jobs:
         EXTRA_CFG: ${{ github.event.inputs.extra_config }}
 
     - name: Defconfig and Download packages
-      id: package
       run: |
         cd openwrt
         DEVICE_CONFIG='CONFIG_TARGET_mediatek_filogic_DEVICE_cudy_tr3000-512mb-v1'
@@ -163,8 +162,7 @@ jobs:
             exit 1
         fi
 
-        # 中文语言包同样会被静默丢弃：.config 里 -zh-cn / -zh_Hans 两种名字都列了，
-        # defconfig 会保留真实存在的那个。两个都没留下 = 界面会整片回退英文。
+        # 中文语言包同样会被静默丢弃，缺了界面就整片回退英文
         if ! grep -qE '^CONFIG_PACKAGE_luci-i18n-base-zh[-_A-Za-z]*=y' .config; then
             echo "::error::中文 base 语言包未生效，界面会回退英文"
             echo "--- .config 里残留的 i18n 行 ---"
