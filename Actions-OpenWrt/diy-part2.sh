@@ -158,10 +158,25 @@ echo "$RELEASE_JSON" | grep -q '"tag_name"' || die "无法获取 Release 信息�
 TAG=$(echo "$RELEASE_JSON" | grep -o '"tag_name"[[:space:]]*:[[:space:]]*"[^"]*"' | head -n 1 | cut -d'"' -f4)
 log "最新版本: ${TAG:-unknown}"
 
-DOWNLOAD_URL=$(echo "$RELEASE_JSON" | grep -o 'https://[^" ]*cudy_tr3000-512mb-v1[^" ]*sysupgrade\.bin' | head -n 1)
-[ -z "$DOWNLOAD_URL" ] && DOWNLOAD_URL=$(echo "$RELEASE_JSON" | grep -o 'https://[^" ]*sysupgrade\.bin' | head -n 1)
-SHA_URL=$(echo "$RELEASE_JSON" | grep -o 'https://[^" ]*sha256sums' | head -n 1)
-[ -n "$DOWNLOAD_URL" ] || die "最新 Release 中没有 sysupgrade 镜像"
+# 不依赖 JSON 原始文本顺序，不允许退回任意机型镜像；匹配结果必须唯一。
+# 与 workflow 的产物筛选规则一致：镜像文件名含专属机型标识并以 sysupgrade.bin 结尾。
+ASSETS=$(echo "$RELEASE_JSON" | jq -r \
+    '.assets[]? | select(.name | contains("cudy_tr3000-512mb-v1") and endswith("sysupgrade.bin")) | [.name, .browser_download_url] | @tsv' 2>/dev/null) \
+    || die "Release 元数据无法解析"
+[ "$(printf '%s\n' "$ASSETS" | grep -c .)" -eq 1 ] \
+    || die "目标机型 sysupgrade 镜像数量不是 1，请人工核对 Release"
+FNAME=$(printf '%s\n' "$ASSETS" | cut -f1)
+DOWNLOAD_URL=$(printf '%s\n' "$ASSETS" | cut -f2)
+case "$DOWNLOAD_URL" in
+    "https://github.com/$REPO/releases/download/"*) ;;
+    *) die "镜像地址不属于目标仓库的 GitHub Release" ;;
+esac
+SHA_URL=$(echo "$RELEASE_JSON" | jq -r \
+    '[.assets[]? | select(.name == "sha256sums") | .browser_download_url] | if length == 1 then .[0] else empty end' 2>/dev/null)
+case "$SHA_URL" in
+    "https://github.com/$REPO/releases/download/"*) ;;
+    *) SHA_URL="" ;;
+esac
 log "镜像地址: $DOWNLOAD_URL"
 
 # ---------- 2. 空间检查 ----------
@@ -210,7 +225,6 @@ log "镜像大小: ${IMG_KB} KiB"
 # ---------- 4. SHA256 校验 ----------
 # 优先级：① API 直连返回的 asset digest  ② 直连下载的 sha256sums
 # 两者都拿不到（或元数据来自镜像）= 无法证明固件没被篡改，默认拒绝。
-FNAME=$(basename "$DOWNLOAD_URL")
 if command -v sha256sum >/dev/null 2>&1; then
     GOT=$(sha256sum "$TMP_BIN" | awk '{print $1}')
 else
@@ -471,6 +485,26 @@ EOF
 chmod +x package/base-files/files/etc/init.d/bbr
 ln -sf ../init.d/bbr package/base-files/files/etc/rc.d/S21bbr
 
+# 首启与热插拔共用同一段防火墙配置逻辑，兼容具名及匿名 zone section。
+cat << 'EOF' > package/base-files/files/usr/bin/f50-firewall-zone.sh
+#!/bin/sh
+WAN_ZONE=""
+for SECTION in $(uci show firewall 2>/dev/null | sed -n 's/^firewall\.\([^=]*\)=zone$/\1/p'); do
+    [ "$(uci -q get "firewall.$SECTION.name")" = "wan" ] || continue
+    WAN_ZONE="$SECTION"
+    break
+done
+[ -n "$WAN_ZONE" ] || { logger -t f50 "找不到 wan 防火墙区域"; exit 1; }
+if uci -q get "firewall.$WAN_ZONE.network" | tr ' ' '\n' | grep -qx f50; then
+    echo unchanged
+    exit 0
+fi
+uci add_list "firewall.$WAN_ZONE.network=f50" || exit 1
+uci commit firewall || exit 1
+echo changed
+EOF
+chmod +x package/base-files/files/usr/bin/f50-firewall-zone.sh
+
 cat << 'EOF' > package/base-files/files/etc/hotplug.d/net/99-f50-auto
 #!/bin/sh
 # F50 5G USB 网卡自动绑定。
@@ -501,6 +535,8 @@ CHANGED=0
 CUR_DEV=$(uci -q get network.f50.device)
 # 模组同时暴露多个网卡时，已绑定的那个还在就不要来回抢，避免网络反复 reload
 if [ -n "$CUR_DEV" ] && [ "$CUR_DEV" != "$INTERFACE" ] && [ -e "/sys/class/net/$CUR_DEV" ]; then
+    [ "$CHANGED" = "1" ] && uci commit network
+    /usr/bin/f50-firewall-zone.sh >/dev/null || exit 1
     exit 0
 fi
 if [ "$CUR_DEV" != "$INTERFACE" ]; then
@@ -509,8 +545,9 @@ if [ "$CUR_DEV" != "$INTERFACE" ]; then
 fi
 
 # 之前这里只在 device 变化时才 commit，其余 uci set 会丢失
-if [ "$CHANGED" = "1" ]; then
-    uci commit network
+FW_CHANGED=$(/usr/bin/f50-firewall-zone.sh) || exit 1
+if [ "$CHANGED" = "1" ] || [ "$FW_CHANGED" = "changed" ]; then
+    [ "$CHANGED" = "1" ] && uci commit network
 
     # 模组抖动时（例如供电不足导致每 10 秒重枚举一次）不要每次都 reload 网络，
     # 否则 Wi-Fi 和 LAN 会被跟着带崩。60 秒内最多重载一次。
@@ -744,13 +781,8 @@ done
 uci set network.f50.device="$USB_DEV"
 uci commit network
 
-# 4. 把 f50 挂到 wan 防火墙区域（不再硬编码 0..10 的索引上限）
-ZONE_IDX=$(uci show firewall 2>/dev/null | sed -n "s/^firewall\.@zone\[\([0-9]\+\)\]\.name=['\"]\?wan['\"]\?$/\1/p" | head -n 1)
-if [ -n "$ZONE_IDX" ]; then
-    uci -q del_list "firewall.@zone[$ZONE_IDX].network=f50" 2>/dev/null
-    uci add_list "firewall.@zone[$ZONE_IDX].network=f50"
-fi
-uci commit firewall
+# 4. 把 f50 挂到 wan 防火墙区域；失败时不要标记首启完成，留待下次修复。
+/usr/bin/f50-firewall-zone.sh >/dev/null || exit 1
 
 # 5. 时区与 NTP
 uci set system.@system[0].zonename='Asia/Shanghai'
@@ -825,6 +857,7 @@ chmod +x package/base-files/files/etc/uci-defaults/99-custom-init
 [ -f package/luci-app-openclash/Makefile ]     || die "luci-app-openclash 未就绪"
 [ -x package/base-files/files/usr/bin/auto-update-firmware.sh ]        || die "OTA 脚本未生成"
 [ -x package/base-files/files/usr/bin/f50-watchdog.sh ]                || die "看门狗脚本未生成"
+[ -x package/base-files/files/usr/bin/f50-firewall-zone.sh ]            || die "F50 防火墙配置脚本未生成"
 [ -f package/base-files/files/etc/uci-defaults/99-custom-init ]        || die "首启脚本未生成"
 [ -f package/base-files/files/www/luci-static/resources/view/autoupdate/index.js ] || die "OTA 视图未生成"
 [ -f package/base-files/files/usr/share/luci/menu.d/luci-app-autoupdate.json ]     || die "OTA 菜单未生成"
