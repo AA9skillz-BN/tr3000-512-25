@@ -102,14 +102,36 @@ MIN_FREE_KB=32768          # 下载前 /tmp 至少要有 32MiB
 HEADROOM_KB=16384          # 下载后还要留 16MiB 余量
 PROXIES="https://ghfast.top/ https://ghproxy.net/"
 
-UPGRADE_OPTS=""
+# 信任模型：镜像（PROXIES）只允许搬运固件文件本身，哈希必须来自 api.github.com 直连。
+# 若直连 API 不可达、只能走镜像，哈希就无法证明镜像没被篡改，默认拒绝升级。
+# 确实只能走镜像时：SSH 里加 -f 放行（风险自负），或把下面改成 1。
+ALLOW_UNVERIFIED=0
+
+UPGRADE_OPTS=""      # 只用于 sysupgrade
+CHILD_ARGS=""        # 只用于转后台时回传给自己
 MODE_DESC="保留当前配置 (无缝升级)"
-if [ "${1:-}" = "-n" ]; then
-    UPGRADE_OPTS="-n"
-    MODE_DESC="不保留配置 (恢复出厂全新刷入)"
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -n) UPGRADE_OPTS="-n"; CHILD_ARGS="$CHILD_ARGS -n"
+            MODE_DESC="不保留配置 (恢复出厂全新刷入)" ;;
+        -f) ALLOW_UNVERIFIED=1; CHILD_ARGS="$CHILD_ARGS -f" ;;
+    esac
+    shift
+done
+
+# LuCI 通过 rpcd 的 file.exec 调用本脚本，rpcd 对 exec 有默认超时（约 30 秒），
+# 下载稍慢就会被连脚本一起杀掉。所以先把自己丢到后台，立刻返回，进度看日志。
+if [ -z "${OTA_BG:-}" ]; then
+    : > "$LOG_FILE"
+    if command -v nohup >/dev/null 2>&1; then
+        OTA_BG=1 nohup /usr/bin/auto-update-firmware.sh $CHILD_ARGS </dev/null >/dev/null 2>&1 &
+    else
+        OTA_BG=1 /usr/bin/auto-update-firmware.sh $CHILD_ARGS </dev/null >/dev/null 2>&1 &
+    fi
+    echo "已转入后台执行，进度: tail -f $LOG_FILE"
+    exit 0
 fi
 
-: > "$LOG_FILE"
 log() { echo "$@" >> "$LOG_FILE"; }
 die() { log "❌ $*"; exit 1; }
 
@@ -120,9 +142,12 @@ log "=========================================="
 
 # ---------- 1. 取最新 Release ----------
 API_URL="https://api.github.com/repos/$REPO/releases/latest"
+META_TRUSTED=1
 RELEASE_JSON=$(curl -fsSL -m 15 -H "User-Agent: Cudy-TR3000-OTA" "$API_URL" 2>>"$LOG_FILE" || true)
 
 if ! echo "$RELEASE_JSON" | grep -q '"tag_name"'; then
+    META_TRUSTED=0
+    log "⚠ GitHub API 直连失败，改走镜像（镜像返回的元数据不可信）"
     for P in $PROXIES; do
         RELEASE_JSON=$(curl -fsSL -m 15 -H "User-Agent: Cudy-TR3000-OTA" "${P}${API_URL}" 2>>"$LOG_FILE" || true)
         echo "$RELEASE_JSON" | grep -q '"tag_name"' && break
@@ -152,12 +177,15 @@ download_file() {
     local url="$1"
     local out="$2"
     local desc="$3"
+    local direct_only="${4:-}"
 
     curl -fsSL --connect-timeout 8 -m 300 -o "$out" "$url" 2>>"$LOG_FILE"
     if [ $? -eq 0 ] && [ -s "$out" ]; then
         log "✔ $desc 下载完成: $(wc -c < "$out") 字节"
         return 0
     fi
+
+    [ -n "$direct_only" ] && { log "✖ $desc 直连下载失败（该文件不允许走镜像）"; return 1; }
 
     for P in $PROXIES; do
         rm -f "$out"
@@ -180,24 +208,44 @@ log "镜像大小: ${IMG_KB} KiB"
     || die "/tmp 空间不足：镜像 ${IMG_KB}KiB + 余量 ${HEADROOM_KB}KiB > 可用 ${AVAIL_KB}KiB"
 
 # ---------- 4. SHA256 校验 ----------
+# 优先级：① API 直连返回的 asset digest  ② 直连下载的 sha256sums
+# 两者都拿不到（或元数据来自镜像）= 无法证明固件没被篡改，默认拒绝。
 FNAME=$(basename "$DOWNLOAD_URL")
-if [ -n "$SHA_URL" ] && download_file "$SHA_URL" "$TMP_SHA" "校验清单"; then
-    WANT=$(awk -v f="$FNAME" '$2 == f || $2 == "*" f {print $1; exit}' "$TMP_SHA")
-    if command -v sha256sum >/dev/null 2>&1; then
-        GOT=$(sha256sum "$TMP_BIN" | awk '{print $1}')
-    else
-        GOT=$(busybox sha256sum "$TMP_BIN" | awk '{print $1}')
-    fi
-    if [ -z "$WANT" ]; then
-        log "⚠ sha256sums 中没有 $FNAME，跳过哈希校验"
-    elif [ "$WANT" != "$GOT" ]; then
-        rm -f "$TMP_BIN"
-        die "SHA256 校验失败：期望 $WANT，实际 $GOT"
-    else
-        log "✔ SHA256 校验通过"
-    fi
+if command -v sha256sum >/dev/null 2>&1; then
+    GOT=$(sha256sum "$TMP_BIN" | awk '{print $1}')
 else
-    log "⚠ 未能获取 sha256sums，跳过哈希校验"
+    GOT=$(busybox sha256sum "$TMP_BIN" | awk '{print $1}')
+fi
+
+WANT=""; WANT_SRC=""
+if [ "$META_TRUSTED" = "1" ]; then
+    if command -v jq >/dev/null 2>&1; then
+        WANT=$(echo "$RELEASE_JSON" | jq -r --arg n "$FNAME" \
+            '.assets[]? | select(.name == $n) | .digest // empty' 2>/dev/null | head -n 1)
+        WANT=${WANT#sha256:}
+    fi
+    if [ -n "$WANT" ]; then
+        WANT_SRC="GitHub API digest"
+    elif [ -n "$SHA_URL" ] && download_file "$SHA_URL" "$TMP_SHA" "校验清单" direct_only; then
+        WANT=$(awk -v f="$FNAME" '$2 == f || $2 == "*" f {print $1; exit}' "$TMP_SHA")
+        [ -n "$WANT" ] && WANT_SRC="直连 sha256sums"
+    fi
+fi
+
+if [ -n "$WANT" ]; then
+    if [ "$WANT" != "$GOT" ]; then
+        rm -f "$TMP_BIN"
+        die "SHA256 校验失败（$WANT_SRC）：期望 $WANT，实际 $GOT"
+    fi
+    log "✔ SHA256 校验通过（来源: $WANT_SRC）"
+else
+    log "⚠ 没有可信的哈希来源（直连 API 不可达或 Release 未提供 digest）"
+    if [ "$ALLOW_UNVERIFIED" = "1" ]; then
+        log "⚠ 已用 -f / ALLOW_UNVERIFIED=1 放行：本次固件完整性未经验证，实际 SHA256: $GOT"
+    else
+        rm -f "$TMP_BIN"
+        die "拒绝升级：无法验证固件完整性。能直连 api.github.com 后重试；确认风险后可 SSH 执行 auto-update-firmware.sh -f"
+    fi
 fi
 
 # ---------- 5. 镜像合规性校验 ----------
@@ -356,7 +404,9 @@ if [ "$F50_ACCEL" = "0" ]; then
 chain f50_ttl {
     type filter hook postrouting priority 300; policy accept;
     oifname { "eth1", "eth2", "usb0" } ip ttl set 65
-    oifname { "eth1", "eth2", "usb0" } ip6 hoplimit set 65
+    # ICMPv6 必须排除：邻居发现/路由通告要求 hop limit 恰好为 255，
+    # 被改成 65 会被对端内核丢弃，IPv6 在该链路上会时好时坏。
+    oifname { "eth1", "eth2", "usb0" } ip6 nexthdr != icmpv6 ip6 hoplimit set 65
 }
 EOF
     echo "✔ 模式: TTL=65 防限速（flow offload 关闭）"
@@ -365,6 +415,11 @@ else
     : > package/base-files/files/etc/f50-accel
     echo "✔ 模式: 硬件加速（不生成 TTL 规则，运营商侧看到 TTL=63）"
 fi
+
+# BBR：OpenClash 代理走的是路由器本机终结的 TCP 连接，拥塞控制算法作用于这一段
+# （纯转发流量不受影响）。内核模块由 .config 里的 kmod-tcp-bbr 提供。
+mkdir -p package/base-files/files/etc/sysctl.d
+echo 'net.ipv4.tcp_congestion_control=bbr' > package/base-files/files/etc/sysctl.d/99-bbr.conf
 
 # USB 自动休眠：必须关掉。
 # TR3000 + F50 实测：usbcore.autosuspend=2 时，模块空闲 2 秒即被挂起，
@@ -448,7 +503,7 @@ cat << 'EOF' > package/base-files/files/usr/bin/f50-watchdog.sh
 # F50 蜂窝链路看门狗（cron 每 3 分钟）
 #   1) 接口不存在 -> 直接退出（modem 被拔掉时不要误重连/误重启）
 #   2) 接口存在但 operstate 不是 up -> 重连
-#   3) 连续探测失败 -> 先重连；REBOOT_AFTER 次后重启（默认关闭，见下方说明）
+#   3) 连续探测失败 -> 第 1 次重连接口，第 2 次软复位 USB，REBOOT_AFTER 次后重启（默认关闭）
 #
 # 注意：ifup 对已经 up 的接口是空操作，救不回卡死的 DHCP 租约，
 # 所以这里一律先 ifdown 再 ifup。
@@ -462,7 +517,23 @@ DEV=$(uci -q get network.f50.device)
 [ -d "/sys/class/net/$DEV" ] || exit 0
 
 STATE=/tmp/.f50_watchdog_fails
-TARGET="${F50_PING_TARGET:-223.5.5.5}"
+# 多个探测目标，任一通即视为链路正常，避免单个目标被限流/屏蔽导致误判
+TARGETS="${F50_PING_TARGET:-223.5.5.5 119.29.29.29}"
+
+# 软复位 USB 设备（等价于拔插一次），比 ifdown/ifup 更能救回"枚举正常但模组卡死"的情况，
+# 又不用整机重启。路径来自 net 设备的 sysfs 链接，不写死端口号。
+usb_reset() {
+    local U
+    U=$(dirname "$(readlink -f "/sys/class/net/$DEV/device" 2>/dev/null)")
+    if [ -w "$U/authorized" ]; then
+        logger -t f50-watchdog "软复位 USB 设备 $U"
+        echo 0 > "$U/authorized"
+        sleep 2
+        echo 1 > "$U/authorized"
+        return 0
+    fi
+    return 1
+}
 
 RECONNECT_STAMP=/tmp/.f50_last_reconnect
 reconnect() {
@@ -487,18 +558,25 @@ if [ "$OPER" != "up" ]; then
     exit 0
 fi
 
-if ping -c 3 -W 2 -I "$DEV" "$TARGET" >/dev/null 2>&1; then
-    rm -f "$STATE"
-    exit 0
-fi
+for T in $TARGETS; do
+    if ping -c 3 -W 2 -I "$DEV" "$T" >/dev/null 2>&1; then
+        rm -f "$STATE"
+        exit 0
+    fi
+done
 
 FAILS=$(cat "$STATE" 2>/dev/null || echo 0)
 case "$FAILS" in ''|*[!0-9]*) FAILS=0 ;; esac
 FAILS=$((FAILS + 1))
 echo "$FAILS" > "$STATE"
-logger -t f50-watchdog "$DEV 探测 $TARGET 失败（连续 ${FAILS} 次）"
+logger -t f50-watchdog "$DEV 探测 $TARGETS 全部失败（连续 ${FAILS} 次）"
 
-reconnect
+# 第 1 次失败：重连接口；第 2 次仍失败：软复位 USB；之后每次继续重连，REBOOT_AFTER 次后重启
+if [ "$FAILS" -eq 2 ]; then
+    usb_reset
+else
+    reconnect
+fi
 
 if [ "${REBOOT_AFTER:-0}" -gt 0 ] 2>/dev/null && [ "$FAILS" -ge "$REBOOT_AFTER" ]; then
     logger -t f50-watchdog "连续 ${FAILS} 次重连无效，重启设备"
@@ -552,8 +630,12 @@ fetch_data "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/down
 fetch_data "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geoip.dat" "$OC_ROOT/GeoIP.dat" "GeoIP.dat"
 
 mkdir -p package/base-files/files/etc
-grep -qxF '/etc/openclash/' package/base-files/files/etc/sysupgrade.conf 2>/dev/null \
-    || echo '/etc/openclash/' >> package/base-files/files/etc/sysupgrade.conf
+# /etc/f50-watchdog.conf：看门狗的 REBOOT_AFTER 设置，不列在这里升级后会丢
+# /etc/.custom-init-done：首启初始化只做一次的标记，丢了会在每次升级后重置 Wi-Fi/NTP 等设置
+for keep in /etc/openclash/ /etc/f50-watchdog.conf /etc/.custom-init-done; do
+    grep -qxF "$keep" package/base-files/files/etc/sysupgrade.conf 2>/dev/null \
+        || echo "$keep" >> package/base-files/files/etc/sysupgrade.conf
+done
 
 # ==============================================================================
 # 7. 统一开机初始化脚本（中文/主题/BBR/F50/Wi-Fi/OpenClash/看门狗）
@@ -562,6 +644,14 @@ mkdir -p package/base-files/files/etc/uci-defaults
 cat << 'EOF' > package/base-files/files/etc/uci-defaults/99-custom-init
 #!/bin/sh
 # 首次启动初始化（执行成功后 OpenWrt 会自动删除本文件）
+#
+# 注意：uci-defaults 里的脚本在"每次升级后的首次启动"都会再跑一遍（脚本在固件里，
+# 保留配置升级只恢复配置文件，不恢复"已执行"状态）。所以下面会改动用户设置的部分
+# （SSID/信道/NTP/MTU/防火墙…）必须只在真正的首次初始化时执行，否则每次 OTA
+# 都会把用户在 LuCI 里改过的设置还原。标记文件由 sysupgrade.conf 保留。
+MARK=/etc/.custom-init-done
+
+if [ ! -f "$MARK" ]; then
 
 # 1. 简体中文 + Aurora 主题
 #    语言代码必须和固件里实际存在的 base.zh*.lmo 对上，写错就是整片英文。
@@ -642,17 +732,22 @@ uci add_list system.ntp.server='time1.cloud.tencent.com'
 uci commit system
 
 # 6. Wi-Fi 6
+#    国家码按实际所在地改（CN / US / JP …），决定可用信道和发射功率上限。
+WIFI_COUNTRY='US'
 for r in radio0 radio1; do
     [ -n "$(uci -q get wireless.$r)" ] || continue
     BAND=$(uci -q get wireless.$r.band)
-    uci set wireless.$r.country='US'
+    uci set wireless.$r.country="$WIFI_COUNTRY"
     uci set wireless.$r.cell_density='0'
     uci set wireless.$r.mu_beamformer='1'
     uci set wireless.$r.disabled='0'
     uci set wireless.default_$r.disabled='0'
     if [ "$BAND" = "5g" ]; then
         uci set wireless.$r.channel='36'
-        uci set wireless.$r.htmode='HE160'
+        # HE160 在 ch36 会占用 36-64，其中 52-64 是 DFS 信道：启动要做约 60 秒雷达检测，
+        # 运行中遇到雷达信号还会被强制换信道断流。HE80(36-48) 全是非 DFS，稳定得多，
+        # 而 F50 上行最高只有 300~500Mbps，用不满 160MHz。
+        uci set wireless.$r.htmode='HE80'
         uci set wireless.default_$r.ssid='Cudy-TR3000-5G'
         uci set wireless.default_$r.disassoc_low_ack='0'
     elif [ "$BAND" = "2g" ]; then
@@ -671,6 +766,11 @@ if [ -f "/etc/config/openclash" ] && [ -x /etc/openclash/core/clash_meta ]; then
     uci set openclash.config.core_version='linux-arm64'
     uci commit openclash
 fi
+
+touch "$MARK"
+fi   # ---- 以上只在首次初始化执行 ----
+
+# 以下每次升级后都执行（幂等，且不碰用户设置）
 chmod 0755 /etc/openclash/core/clash* 2>/dev/null || true
 
 # 8. 看门狗计划任务
@@ -701,6 +801,7 @@ chmod +x package/base-files/files/etc/uci-defaults/99-custom-init
 [ -x package/base-files/files/etc/init.d/usb-nosuspend ]  || die "USB 禁止休眠脚本未生成"
 [ -e package/base-files/files/etc/rc.d/S20usb-nosuspend ] || die "USB 禁止休眠未挂到 rc.d"
 [ -f package/base-files/files/usr/share/rpcd/acl.d/luci-app-autoupdate.json ]      || die "OTA ACL 未生成"
+[ -f package/base-files/files/etc/sysctl.d/99-bbr.conf ]                           || die "BBR sysctl 配置未生成"
 
 if [ "$F50_ACCEL" = "0" ]; then
     [ -f package/base-files/files/usr/share/nftables.d/table-post/99-f50-ttl.nft ] || die "TTL 规则未生成"
