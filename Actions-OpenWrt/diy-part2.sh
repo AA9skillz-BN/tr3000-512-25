@@ -417,9 +417,12 @@ else
 fi
 
 # BBR：OpenClash 代理走的是路由器本机终结的 TCP 连接，拥塞控制算法作用于这一段
-# （纯转发流量不受影响）。内核模块由 .config 里的 kmod-tcp-bbr 提供。
+# （纯转发流量不受影响）。内核模块 kmod-tcp-bbr 由 .config 提供。
+# 注意：/etc/sysctl.d 在部分版本上不会被自动加载，真正生效的是下面的 /etc/init.d/bbr，
+# 它直接写 /proc；这里的 sysctl 文件只作为兼容保留。
 mkdir -p package/base-files/files/etc/sysctl.d
-echo 'net.ipv4.tcp_congestion_control=bbr' > package/base-files/files/etc/sysctl.d/99-bbr.conf
+printf 'net.core.default_qdisc=fq\nnet.ipv4.tcp_congestion_control=bbr\n' \
+    > package/base-files/files/etc/sysctl.d/99-bbr.conf
 
 # USB 自动休眠：必须关掉。
 # TR3000 + F50 实测：usbcore.autosuspend=2 时，模块空闲 2 秒即被挂起，
@@ -441,6 +444,32 @@ start() {
 EOF
 chmod +x package/base-files/files/etc/init.d/usb-nosuspend
 ln -sf ../init.d/usb-nosuspend package/base-files/files/etc/rc.d/S20usb-nosuspend
+
+cat << 'EOF' > package/base-files/files/etc/init.d/bbr
+#!/bin/sh /etc/rc.common
+# 启用 BBR 拥塞控制。
+# 作用范围仅限路由器本机终结的 TCP（OpenClash 隧道、路由器自身下载），
+# 经过 NAT 转发的流量由两端主机决定，不受影响。
+START=21
+
+start() {
+	# 模块不在就先加载（kmod-tcp-bbr 由 .config 提供）
+	[ -d /sys/module/tcp_bbr ] || modprobe tcp_bbr 2>/dev/null
+
+	# 直接写 /proc，不依赖 /etc/sysctl.d 是否被系统加载
+	echo fq > /proc/sys/net/core/default_qdisc 2>/dev/null
+	echo bbr > /proc/sys/net/ipv4/tcp_congestion_control 2>/dev/null
+
+	CC=$(cat /proc/sys/net/ipv4/tcp_congestion_control 2>/dev/null)
+	if [ "$CC" = "bbr" ]; then
+		logger -t bbr "BBR 已启用"
+	else
+		logger -t bbr "BBR 启用失败，当前 ${CC:-unknown}（kmod-tcp-bbr 缺失？）"
+	fi
+}
+EOF
+chmod +x package/base-files/files/etc/init.d/bbr
+ln -sf ../init.d/bbr package/base-files/files/etc/rc.d/S21bbr
 
 cat << 'EOF' > package/base-files/files/etc/hotplug.d/net/99-f50-auto
 #!/bin/sh
@@ -732,8 +761,9 @@ uci add_list system.ntp.server='time1.cloud.tencent.com'
 uci commit system
 
 # 6. Wi-Fi 6
-#    国家码按实际所在地改（CN / US / JP …），决定可用信道和发射功率上限。
-WIFI_COUNTRY='US'
+#    国家码按实际所在地设置：这里用 CN（5150–5350 室内 200mW、2400–2483.5）。
+#    5G 固定 ch36 + HE80，占用 36–48，全部落在 CN 的非 DFS 频段里。
+WIFI_COUNTRY='CN'
 for r in radio0 radio1; do
     [ -n "$(uci -q get wireless.$r)" ] || continue
     BAND=$(uci -q get wireless.$r.band)
@@ -802,6 +832,8 @@ chmod +x package/base-files/files/etc/uci-defaults/99-custom-init
 [ -e package/base-files/files/etc/rc.d/S20usb-nosuspend ] || die "USB 禁止休眠未挂到 rc.d"
 [ -f package/base-files/files/usr/share/rpcd/acl.d/luci-app-autoupdate.json ]      || die "OTA ACL 未生成"
 [ -f package/base-files/files/etc/sysctl.d/99-bbr.conf ]                           || die "BBR sysctl 配置未生成"
+[ -x package/base-files/files/etc/init.d/bbr ]                                     || die "BBR 启动脚本未生成"
+[ -e package/base-files/files/etc/rc.d/S21bbr ]                                    || die "BBR 未挂到 rc.d"
 
 if [ "$F50_ACCEL" = "0" ]; then
     [ -f package/base-files/files/usr/share/nftables.d/table-post/99-f50-ttl.nft ] || die "TTL 规则未生成"
