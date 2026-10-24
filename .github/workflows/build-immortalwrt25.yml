@@ -19,6 +19,11 @@ on:
         required: true
         default: 'owrt'
         type: string
+      repo_commit:
+        description: '固定上游 commit（留空=分支最新；定时构建会随上游漂移，出问题时用发布说明里记录的 commit 锁定）'
+        required: false
+        default: ''
+        type: string
       extra_config:
         description: '临时追加的插件配置（多行按换行分隔）'
         required: false
@@ -92,10 +97,16 @@ jobs:
 
         FULL_URL="https://github.com/${REPO_PATH}.git"
         git clone "$FULL_URL" -b "$BRANCH" openwrt
+        if [ -n "$PIN_COMMIT" ]; then
+            git -C openwrt checkout --detach "$PIN_COMMIT"
+        fi
         ln -sf /workdir/openwrt $GITHUB_WORKSPACE/openwrt
         
         echo "ACTUAL_REPO=$REPO_PATH" >> $GITHUB_ENV
         echo "ACTUAL_BRANCH=$BRANCH" >> $GITHUB_ENV
+        echo "ACTUAL_COMMIT=$(git -C openwrt rev-parse HEAD)" >> $GITHUB_ENV
+      env:
+        PIN_COMMIT: ${{ github.event.inputs.repo_commit }}
 
     - name: Load custom feeds
       run: |
@@ -252,9 +263,16 @@ jobs:
         echo "🚀 Cudy TR3000 (512MB Flash) 专属固件发布" > release.txt
         echo "--------------------------------------------------" >> release.txt
         echo "• 源码仓库: ${{ env.ACTUAL_REPO }} (${{ env.ACTUAL_BRANCH }})" >> release.txt
+        echo "• 上游 commit: ${{ env.ACTUAL_COMMIT }}（出问题时可在手动构建的 repo_commit 里填它来锁定版本）" >> release.txt
         echo "• 默认后台: 192.168.6.1" >> release.txt
         echo "• 硬件分区: U-Boot 请选择 mod-490 布局" >> release.txt
-        echo "• 预置功能: Aurora 现代主题 / OpenClash (内置 Meta 内核) / 中兴 F50 5G 即插即用 / BBR 拥塞控制 / TTL=65 防限速（已关闭 flow offload 以保证 TTL 生效）" >> release.txt
+        FEATURES="Aurora 现代主题 / OpenClash (内置 Meta 内核) / 中兴 F50 5G 即插即用"
+        # BBR 只在 defconfig 后确实还在 .config 里时才写进说明，避免说明和固件不一致
+        if grep -q '^CONFIG_PACKAGE_kmod-tcp-bbr=y' openwrt/.config; then
+            FEATURES="$FEATURES / BBR 拥塞控制"
+        fi
+        FEATURES="$FEATURES / TTL=65 防限速（已关闭 flow offload 以保证 TTL 生效）"
+        echo "• 预置功能: $FEATURES" >> release.txt
         echo "status=success" >> $GITHUB_OUTPUT
 
     - name: Upload firmware to release
