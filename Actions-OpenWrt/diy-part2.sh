@@ -417,10 +417,13 @@ if [ "$F50_ACCEL" = "0" ]; then
     cat << 'EOF' > package/base-files/files/usr/share/nftables.d/table-post/99-f50-ttl.nft
 chain f50_ttl {
     type filter hook postrouting priority 300; policy accept;
-    oifname { "eth1", "eth2", "usb0" } ip ttl set 65
+    # 上游 TR3000 有线 WAN=eth0、LAN=eth1；F50 的设备名由热插拔脚本确定。
+    # fw4 的 wan_devices 来自 wan 区域，涵盖 eth0 和实际绑定的 F50 出口，
+    # 不再误改 LAN，也不依赖 USB 网卡固定枚举成 eth2/usb0。
+    oifname $wan_devices ip ttl set 65
     # ICMPv6 必须排除：邻居发现/路由通告要求 hop limit 恰好为 255，
     # 被改成 65 会被对端内核丢弃，IPv6 在该链路上会时好时坏。
-    oifname { "eth1", "eth2", "usb0" } ip6 nexthdr != icmpv6 ip6 hoplimit set 65
+    oifname $wan_devices ip6 nexthdr != icmpv6 ip6 hoplimit set 65
 }
 EOF
     echo "✔ 模式: TTL=65 防限速（flow offload 关闭）"
