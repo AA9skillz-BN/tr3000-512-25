@@ -43,6 +43,71 @@ grep -q "reg = <${UBI_OFFSET} ${UBI_SIZE_512M}>" "$ORIG_DTS" \
 echo "✔ 设备树 ubi 分区已扩容到 480MiB 布局（512MiB 颗粒）：$ORIG_DTS"
 
 # ==============================================================================
+# 2.1 TR3000 F50 模组供电：按 padavanonly/immortalwrt-mt798x-24.10 的
+#     mt7981b-cudy-tr3000-v1.dtsi + 03_gpio_switches 配套设置 GPIO9。
+#     上游当前用 regulator-fixed 控制 USB VBUS；不能同时让 gpio-export
+#     和 regulator 占用 GPIO9。只接受已核对过的两种 DTS 形态，避免上游
+#     改动时静默产生半套供电配置。此处不动上述 512MiB UBI 分区大小。
+# ==============================================================================
+TR3000_DTSI="target/linux/mediatek/dts/mt7981b-cudy-tr3000-v1.dtsi"
+GPIO_SWITCHES="target/linux/mediatek/filogic/base-files/etc/board.d/03_gpio_switches"
+[ -f "$TR3000_DTSI" ] || die "TR3000 设备树不存在: $TR3000_DTSI"
+[ -f "$GPIO_SWITCHES" ] || die "GPIO 开关配置不存在: $GPIO_SWITCHES"
+python3 - "$TR3000_DTSI" "$GPIO_SWITCHES" <<'PY'
+from pathlib import Path
+import sys
+
+dtsi_path, switches_path = map(Path, sys.argv[1:])
+dtsi = dtsi_path.read_text()
+regulator = '''\tusb_vbus: regulator-usb {
+\t\tcompatible = "regulator-fixed";
+\t\tregulator-name = "usb-vbus";
+\t\tregulator-min-microvolt = <5000000>;
+\t\tregulator-max-microvolt = <5000000>;
+\t\tgpios = <&pio 9 GPIO_ACTIVE_LOW>;
+\t\tregulator-boot-on;
+\t};'''
+export = '''\tgpio-export {
+\t\tcompatible = "gpio-export";
+
+\t\tmodem-power {
+\t\t\tgpio-export,name = "modem_power";
+\t\t\tgpio-export,output = <0>;
+\t\t\tgpios = <&pio 9 GPIO_ACTIVE_LOW>;
+\t\t};
+\t};'''
+old_xhci = '''&xhci {
+\tstatus = "okay";
+\tvbus-supply = <&usb_vbus>;
+};'''
+new_xhci = '''&xhci {
+\tstatus = "okay";
+};'''
+if dtsi.count(regulator) == 1 and dtsi.count(old_xhci) == 1 and export not in dtsi:
+    dtsi = dtsi.replace(regulator, export).replace(old_xhci, new_xhci)
+elif dtsi.count(export) != 1 or dtsi.count(new_xhci) != 1:
+    raise SystemExit("TR3000 GPIO9 供电 DTS 结构不符合已核对版本，停止构建")
+if "usb_vbus:" in dtsi or "vbus-supply = <&usb_vbus>" in dtsi:
+    raise SystemExit("TR3000 GPIO9 仍被 regulator 引用，停止构建")
+
+switches = switches_path.read_text()
+entry = '''cudy,tr3000-v1)
+\tucidef_add_gpio_switch "modem_power" "Modem power" "modem_power" "1"
+\t;;'''
+if entry not in switches:
+    marker = 'case "$board" in\n'
+    if switches.count(marker) != 1 or "ucidef_add_gpio_switch \"modem_power\" \"Modem power\" \"modem_power\"" in switches:
+        raise SystemExit("TR3000 GPIO 开关配置结构不符合预期，停止构建")
+    switches = switches.replace(marker, marker + entry + '\n', 1)
+dtsi_path.write_text(dtsi)
+switches_path.write_text(switches)
+PY
+# 模组供电须成套：DTS 导出 GPIO9、系统默认开启开关。
+grep -q 'gpio-export,name = "modem_power"' "$TR3000_DTSI" || die "modem_power 未导出"
+grep -q 'ucidef_add_gpio_switch "modem_power" "Modem power" "modem_power" "1"' "$GPIO_SWITCHES" || die "modem_power 默认开关未配置"
+echo "✔ TR3000 GPIO9 模组供电已按参考源码设置"
+
+# ==============================================================================
 # 3. 注入 512MB 专属机型定义
 # ==============================================================================
 FILOGIC_MK="target/linux/mediatek/image/filogic.mk"
@@ -835,7 +900,17 @@ fi
 touch "$MARK"
 fi   # ---- 以上只在首次初始化执行 ----
 
-# 以下每次升级后都执行（幂等，且不碰用户设置）
+# 以下每次升级后都执行（幂等，不覆盖已有用户设置）
+# 保留配置升级时 /etc/config/system 可能来自旧固件，没有参考源码的 modem_power 开关。
+# 仅在完全缺失时补建并立即开启；用户已经设置过开关则尊重其选择。
+if [ -d /sys/class/gpio/modem_power ] && [ -z "$(uci -q get system.modem_power)" ]; then
+    uci set system.modem_power='gpio_switch'
+    uci set system.modem_power.name='Modem power'
+    uci set system.modem_power.gpio_pin='modem_power'
+    uci set system.modem_power.value='1'
+    uci commit system
+    /etc/init.d/gpio_switch restart
+fi
 chmod 0755 /etc/openclash/core/clash* 2>/dev/null || true
 
 # 8. 看门狗计划任务
