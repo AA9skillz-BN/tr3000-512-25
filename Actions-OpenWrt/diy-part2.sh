@@ -43,71 +43,6 @@ grep -q "reg = <${UBI_OFFSET} ${UBI_SIZE_512M}>" "$ORIG_DTS" \
 echo "✔ 设备树 ubi 分区已扩容到 480MiB 布局（512MiB 颗粒）：$ORIG_DTS"
 
 # ==============================================================================
-# 2.1 TR3000 F50 模组供电：按 padavanonly/immortalwrt-mt798x-24.10 的
-#     mt7981b-cudy-tr3000-v1.dtsi + 03_gpio_switches 配套设置 GPIO9。
-#     上游当前用 regulator-fixed 控制 USB VBUS；不能同时让 gpio-export
-#     和 regulator 占用 GPIO9。只接受已核对过的两种 DTS 形态，避免上游
-#     改动时静默产生半套供电配置。此处不动上述 512MiB UBI 分区大小。
-# ==============================================================================
-TR3000_DTSI="target/linux/mediatek/dts/mt7981b-cudy-tr3000-v1.dtsi"
-GPIO_SWITCHES="target/linux/mediatek/filogic/base-files/etc/board.d/03_gpio_switches"
-[ -f "$TR3000_DTSI" ] || die "TR3000 设备树不存在: $TR3000_DTSI"
-[ -f "$GPIO_SWITCHES" ] || die "GPIO 开关配置不存在: $GPIO_SWITCHES"
-python3 - "$TR3000_DTSI" "$GPIO_SWITCHES" <<'PY'
-from pathlib import Path
-import sys
-
-dtsi_path, switches_path = map(Path, sys.argv[1:])
-dtsi = dtsi_path.read_text()
-regulator = '''\tusb_vbus: regulator-usb {
-\t\tcompatible = "regulator-fixed";
-\t\tregulator-name = "usb-vbus";
-\t\tregulator-min-microvolt = <5000000>;
-\t\tregulator-max-microvolt = <5000000>;
-\t\tgpios = <&pio 9 GPIO_ACTIVE_LOW>;
-\t\tregulator-boot-on;
-\t};'''
-export = '''\tgpio-export {
-\t\tcompatible = "gpio-export";
-
-\t\tmodem-power {
-\t\t\tgpio-export,name = "modem_power";
-\t\t\tgpio-export,output = <0>;
-\t\t\tgpios = <&pio 9 GPIO_ACTIVE_LOW>;
-\t\t};
-\t};'''
-old_xhci = '''&xhci {
-\tstatus = "okay";
-\tvbus-supply = <&usb_vbus>;
-};'''
-new_xhci = '''&xhci {
-\tstatus = "okay";
-};'''
-if dtsi.count(regulator) == 1 and dtsi.count(old_xhci) == 1 and export not in dtsi:
-    dtsi = dtsi.replace(regulator, export).replace(old_xhci, new_xhci)
-elif dtsi.count(export) != 1 or dtsi.count(new_xhci) != 1:
-    raise SystemExit("TR3000 GPIO9 供电 DTS 结构不符合已核对版本，停止构建")
-if "usb_vbus:" in dtsi or "vbus-supply = <&usb_vbus>" in dtsi:
-    raise SystemExit("TR3000 GPIO9 仍被 regulator 引用，停止构建")
-
-switches = switches_path.read_text()
-entry = '''cudy,tr3000-v1)
-\tucidef_add_gpio_switch "modem_power" "Modem power" "modem_power" "1"
-\t;;'''
-if entry not in switches:
-    marker = 'case "$board" in\n'
-    if switches.count(marker) != 1 or "ucidef_add_gpio_switch \"modem_power\" \"Modem power\" \"modem_power\"" in switches:
-        raise SystemExit("TR3000 GPIO 开关配置结构不符合预期，停止构建")
-    switches = switches.replace(marker, marker + entry + '\n', 1)
-dtsi_path.write_text(dtsi)
-switches_path.write_text(switches)
-PY
-# 模组供电须成套：DTS 导出 GPIO9、系统默认开启开关。
-grep -q 'gpio-export,name = "modem_power"' "$TR3000_DTSI" || die "modem_power 未导出"
-grep -q 'ucidef_add_gpio_switch "modem_power" "Modem power" "modem_power" "1"' "$GPIO_SWITCHES" || die "modem_power 默认开关未配置"
-echo "✔ TR3000 GPIO9 模组供电已按参考源码设置"
-
-# ==============================================================================
 # 3. 注入 512MB 专属机型定义
 # ==============================================================================
 FILOGIC_MK="target/linux/mediatek/image/filogic.mk"
@@ -167,36 +102,14 @@ MIN_FREE_KB=32768          # 下载前 /tmp 至少要有 32MiB
 HEADROOM_KB=16384          # 下载后还要留 16MiB 余量
 PROXIES="https://ghfast.top/ https://ghproxy.net/"
 
-# 信任模型：镜像（PROXIES）只允许搬运固件文件本身，哈希必须来自 api.github.com 直连。
-# 若直连 API 不可达、只能走镜像，哈希就无法证明镜像没被篡改，默认拒绝升级。
-# 确实只能走镜像时：SSH 里加 -f 放行（风险自负），或把下面改成 1。
-ALLOW_UNVERIFIED=0
-
-UPGRADE_OPTS=""      # 只用于 sysupgrade
-CHILD_ARGS=""        # 只用于转后台时回传给自己
+UPGRADE_OPTS=""
 MODE_DESC="保留当前配置 (无缝升级)"
-while [ $# -gt 0 ]; do
-    case "$1" in
-        -n) UPGRADE_OPTS="-n"; CHILD_ARGS="$CHILD_ARGS -n"
-            MODE_DESC="不保留配置 (恢复出厂全新刷入)" ;;
-        -f) ALLOW_UNVERIFIED=1; CHILD_ARGS="$CHILD_ARGS -f" ;;
-    esac
-    shift
-done
-
-# LuCI 通过 rpcd 的 file.exec 调用本脚本，rpcd 对 exec 有默认超时（约 30 秒），
-# 下载稍慢就会被连脚本一起杀掉。所以先把自己丢到后台，立刻返回，进度看日志。
-if [ -z "${OTA_BG:-}" ]; then
-    : > "$LOG_FILE"
-    if command -v nohup >/dev/null 2>&1; then
-        OTA_BG=1 nohup /usr/bin/auto-update-firmware.sh $CHILD_ARGS </dev/null >/dev/null 2>&1 &
-    else
-        OTA_BG=1 /usr/bin/auto-update-firmware.sh $CHILD_ARGS </dev/null >/dev/null 2>&1 &
-    fi
-    echo "已转入后台执行，进度: tail -f $LOG_FILE"
-    exit 0
+if [ "${1:-}" = "-n" ]; then
+    UPGRADE_OPTS="-n"
+    MODE_DESC="不保留配置 (恢复出厂全新刷入)"
 fi
 
+: > "$LOG_FILE"
 log() { echo "$@" >> "$LOG_FILE"; }
 die() { log "❌ $*"; exit 1; }
 
@@ -207,12 +120,9 @@ log "=========================================="
 
 # ---------- 1. 取最新 Release ----------
 API_URL="https://api.github.com/repos/$REPO/releases/latest"
-META_TRUSTED=1
 RELEASE_JSON=$(curl -fsSL -m 15 -H "User-Agent: Cudy-TR3000-OTA" "$API_URL" 2>>"$LOG_FILE" || true)
 
 if ! echo "$RELEASE_JSON" | grep -q '"tag_name"'; then
-    META_TRUSTED=0
-    log "⚠ GitHub API 直连失败，改走镜像（镜像返回的元数据不可信）"
     for P in $PROXIES; do
         RELEASE_JSON=$(curl -fsSL -m 15 -H "User-Agent: Cudy-TR3000-OTA" "${P}${API_URL}" 2>>"$LOG_FILE" || true)
         echo "$RELEASE_JSON" | grep -q '"tag_name"' && break
@@ -223,25 +133,10 @@ echo "$RELEASE_JSON" | grep -q '"tag_name"' || die "无法获取 Release 信息�
 TAG=$(echo "$RELEASE_JSON" | grep -o '"tag_name"[[:space:]]*:[[:space:]]*"[^"]*"' | head -n 1 | cut -d'"' -f4)
 log "最新版本: ${TAG:-unknown}"
 
-# 不依赖 JSON 原始文本顺序，不允许退回任意机型镜像；匹配结果必须唯一。
-# 与 workflow 的产物筛选规则一致：镜像文件名含专属机型标识并以 sysupgrade.bin 结尾。
-ASSETS=$(echo "$RELEASE_JSON" | jq -r \
-    '.assets[]? | select(.name | contains("cudy_tr3000-512mb-v1") and endswith("sysupgrade.bin")) | [.name, .browser_download_url] | @tsv' 2>/dev/null) \
-    || die "Release 元数据无法解析"
-[ "$(printf '%s\n' "$ASSETS" | grep -c .)" -eq 1 ] \
-    || die "目标机型 sysupgrade 镜像数量不是 1，请人工核对 Release"
-FNAME=$(printf '%s\n' "$ASSETS" | cut -f1)
-DOWNLOAD_URL=$(printf '%s\n' "$ASSETS" | cut -f2)
-case "$DOWNLOAD_URL" in
-    "https://github.com/$REPO/releases/download/"*) ;;
-    *) die "镜像地址不属于目标仓库的 GitHub Release" ;;
-esac
-SHA_URL=$(echo "$RELEASE_JSON" | jq -r \
-    '[.assets[]? | select(.name == "sha256sums") | .browser_download_url] | if length == 1 then .[0] else empty end' 2>/dev/null)
-case "$SHA_URL" in
-    "https://github.com/$REPO/releases/download/"*) ;;
-    *) SHA_URL="" ;;
-esac
+DOWNLOAD_URL=$(echo "$RELEASE_JSON" | grep -o 'https://[^" ]*cudy_tr3000-512mb-v1[^" ]*sysupgrade\.bin' | head -n 1)
+[ -z "$DOWNLOAD_URL" ] && DOWNLOAD_URL=$(echo "$RELEASE_JSON" | grep -o 'https://[^" ]*sysupgrade\.bin' | head -n 1)
+SHA_URL=$(echo "$RELEASE_JSON" | grep -o 'https://[^" ]*sha256sums' | head -n 1)
+[ -n "$DOWNLOAD_URL" ] || die "最新 Release 中没有 sysupgrade 镜像"
 log "镜像地址: $DOWNLOAD_URL"
 
 # ---------- 2. 空间检查 ----------
@@ -257,15 +152,12 @@ download_file() {
     local url="$1"
     local out="$2"
     local desc="$3"
-    local direct_only="${4:-}"
 
     curl -fsSL --connect-timeout 8 -m 300 -o "$out" "$url" 2>>"$LOG_FILE"
     if [ $? -eq 0 ] && [ -s "$out" ]; then
         log "✔ $desc 下载完成: $(wc -c < "$out") 字节"
         return 0
     fi
-
-    [ -n "$direct_only" ] && { log "✖ $desc 直连下载失败（该文件不允许走镜像）"; return 1; }
 
     for P in $PROXIES; do
         rm -f "$out"
@@ -288,43 +180,24 @@ log "镜像大小: ${IMG_KB} KiB"
     || die "/tmp 空间不足：镜像 ${IMG_KB}KiB + 余量 ${HEADROOM_KB}KiB > 可用 ${AVAIL_KB}KiB"
 
 # ---------- 4. SHA256 校验 ----------
-# 优先级：① API 直连返回的 asset digest  ② 直连下载的 sha256sums
-# 两者都拿不到（或元数据来自镜像）= 无法证明固件没被篡改，默认拒绝。
-if command -v sha256sum >/dev/null 2>&1; then
-    GOT=$(sha256sum "$TMP_BIN" | awk '{print $1}')
-else
-    GOT=$(busybox sha256sum "$TMP_BIN" | awk '{print $1}')
-fi
-
-WANT=""; WANT_SRC=""
-if [ "$META_TRUSTED" = "1" ]; then
-    if command -v jq >/dev/null 2>&1; then
-        WANT=$(echo "$RELEASE_JSON" | jq -r --arg n "$FNAME" \
-            '.assets[]? | select(.name == $n) | .digest // empty' 2>/dev/null | head -n 1)
-        WANT=${WANT#sha256:}
-    fi
-    if [ -n "$WANT" ]; then
-        WANT_SRC="GitHub API digest"
-    elif [ -n "$SHA_URL" ] && download_file "$SHA_URL" "$TMP_SHA" "校验清单" direct_only; then
-        WANT=$(awk -v f="$FNAME" '$2 == f || $2 == "*" f {print $1; exit}' "$TMP_SHA")
-        [ -n "$WANT" ] && WANT_SRC="直连 sha256sums"
-    fi
-fi
-
-if [ -n "$WANT" ]; then
-    if [ "$WANT" != "$GOT" ]; then
-        rm -f "$TMP_BIN"
-        die "SHA256 校验失败（$WANT_SRC）：期望 $WANT，实际 $GOT"
-    fi
-    log "✔ SHA256 校验通过（来源: $WANT_SRC）"
-else
-    log "⚠ 没有可信的哈希来源（直连 API 不可达或 Release 未提供 digest）"
-    if [ "$ALLOW_UNVERIFIED" = "1" ]; then
-        log "⚠ 已用 -f / ALLOW_UNVERIFIED=1 放行：本次固件完整性未经验证，实际 SHA256: $GOT"
+FNAME=$(basename "$DOWNLOAD_URL")
+if [ -n "$SHA_URL" ] && download_file "$SHA_URL" "$TMP_SHA" "校验清单"; then
+    WANT=$(awk -v f="$FNAME" '$2 == f || $2 == "*" f {print $1; exit}' "$TMP_SHA")
+    if command -v sha256sum >/dev/null 2>&1; then
+        GOT=$(sha256sum "$TMP_BIN" | awk '{print $1}')
     else
-        rm -f "$TMP_BIN"
-        die "拒绝升级：无法验证固件完整性。能直连 api.github.com 后重试；确认风险后可 SSH 执行 auto-update-firmware.sh -f"
+        GOT=$(busybox sha256sum "$TMP_BIN" | awk '{print $1}')
     fi
+    if [ -z "$WANT" ]; then
+        log "⚠ sha256sums 中没有 $FNAME，跳过哈希校验"
+    elif [ "$WANT" != "$GOT" ]; then
+        rm -f "$TMP_BIN"
+        die "SHA256 校验失败：期望 $WANT，实际 $GOT"
+    else
+        log "✔ SHA256 校验通过"
+    fi
+else
+    log "⚠ 未能获取 sha256sums，跳过哈希校验"
 fi
 
 # ---------- 5. 镜像合规性校验 ----------
@@ -482,13 +355,8 @@ if [ "$F50_ACCEL" = "0" ]; then
     cat << 'EOF' > package/base-files/files/usr/share/nftables.d/table-post/99-f50-ttl.nft
 chain f50_ttl {
     type filter hook postrouting priority 300; policy accept;
-    # 上游 TR3000 有线 WAN=eth0、LAN=eth1；F50 的设备名由热插拔脚本确定。
-    # fw4 的 wan_devices 来自 wan 区域，涵盖 eth0 和实际绑定的 F50 出口，
-    # 不再误改 LAN，也不依赖 USB 网卡固定枚举成 eth2/usb0。
-    oifname $wan_devices ip ttl set 65
-    # ICMPv6 必须排除：邻居发现/路由通告要求 hop limit 恰好为 255，
-    # 被改成 65 会被对端内核丢弃，IPv6 在该链路上会时好时坏。
-    oifname $wan_devices ip6 nexthdr != icmpv6 ip6 hoplimit set 65
+    oifname { "eth1", "eth2", "usb0" } ip ttl set 65
+    oifname { "eth1", "eth2", "usb0" } ip6 hoplimit set 65
 }
 EOF
     echo "✔ 模式: TTL=65 防限速（flow offload 关闭）"
@@ -497,14 +365,6 @@ else
     : > package/base-files/files/etc/f50-accel
     echo "✔ 模式: 硬件加速（不生成 TTL 规则，运营商侧看到 TTL=63）"
 fi
-
-# BBR：OpenClash 代理走的是路由器本机终结的 TCP 连接，拥塞控制算法作用于这一段
-# （纯转发流量不受影响）。内核模块 kmod-tcp-bbr 由 .config 提供。
-# 注意：/etc/sysctl.d 在部分版本上不会被自动加载，真正生效的是下面的 /etc/init.d/bbr，
-# 它直接写 /proc；这里的 sysctl 文件只作为兼容保留。
-mkdir -p package/base-files/files/etc/sysctl.d
-printf 'net.core.default_qdisc=fq\nnet.ipv4.tcp_congestion_control=bbr\n' \
-    > package/base-files/files/etc/sysctl.d/99-bbr.conf
 
 # USB 自动休眠：必须关掉。
 # TR3000 + F50 实测：usbcore.autosuspend=2 时，模块空闲 2 秒即被挂起，
@@ -526,52 +386,6 @@ start() {
 EOF
 chmod +x package/base-files/files/etc/init.d/usb-nosuspend
 ln -sf ../init.d/usb-nosuspend package/base-files/files/etc/rc.d/S20usb-nosuspend
-
-cat << 'EOF' > package/base-files/files/etc/init.d/bbr
-#!/bin/sh /etc/rc.common
-# 启用 BBR 拥塞控制。
-# 作用范围仅限路由器本机终结的 TCP（OpenClash 隧道、路由器自身下载），
-# 经过 NAT 转发的流量由两端主机决定，不受影响。
-START=21
-
-start() {
-	# 模块不在就先加载（kmod-tcp-bbr 由 .config 提供）
-	[ -d /sys/module/tcp_bbr ] || modprobe tcp_bbr 2>/dev/null
-
-	# 直接写 /proc，不依赖 /etc/sysctl.d 是否被系统加载
-	echo fq > /proc/sys/net/core/default_qdisc 2>/dev/null
-	echo bbr > /proc/sys/net/ipv4/tcp_congestion_control 2>/dev/null
-
-	CC=$(cat /proc/sys/net/ipv4/tcp_congestion_control 2>/dev/null)
-	if [ "$CC" = "bbr" ]; then
-		logger -t bbr "BBR 已启用"
-	else
-		logger -t bbr "BBR 启用失败，当前 ${CC:-unknown}（kmod-tcp-bbr 缺失？）"
-	fi
-}
-EOF
-chmod +x package/base-files/files/etc/init.d/bbr
-ln -sf ../init.d/bbr package/base-files/files/etc/rc.d/S21bbr
-
-# 首启与热插拔共用同一段防火墙配置逻辑，兼容具名及匿名 zone section。
-cat << 'EOF' > package/base-files/files/usr/bin/f50-firewall-zone.sh
-#!/bin/sh
-WAN_ZONE=""
-for SECTION in $(uci show firewall 2>/dev/null | sed -n 's/^firewall\.\([^=]*\)=zone$/\1/p'); do
-    [ "$(uci -q get "firewall.$SECTION.name")" = "wan" ] || continue
-    WAN_ZONE="$SECTION"
-    break
-done
-[ -n "$WAN_ZONE" ] || { logger -t f50 "找不到 wan 防火墙区域"; exit 1; }
-if uci -q get "firewall.$WAN_ZONE.network" | tr ' ' '\n' | grep -qx f50; then
-    echo unchanged
-    exit 0
-fi
-uci add_list "firewall.$WAN_ZONE.network=f50" || exit 1
-uci commit firewall || exit 1
-echo changed
-EOF
-chmod +x package/base-files/files/usr/bin/f50-firewall-zone.sh
 
 cat << 'EOF' > package/base-files/files/etc/hotplug.d/net/99-f50-auto
 #!/bin/sh
@@ -603,8 +417,6 @@ CHANGED=0
 CUR_DEV=$(uci -q get network.f50.device)
 # 模组同时暴露多个网卡时，已绑定的那个还在就不要来回抢，避免网络反复 reload
 if [ -n "$CUR_DEV" ] && [ "$CUR_DEV" != "$INTERFACE" ] && [ -e "/sys/class/net/$CUR_DEV" ]; then
-    [ "$CHANGED" = "1" ] && uci commit network
-    /usr/bin/f50-firewall-zone.sh >/dev/null || exit 1
     exit 0
 fi
 if [ "$CUR_DEV" != "$INTERFACE" ]; then
@@ -613,9 +425,8 @@ if [ "$CUR_DEV" != "$INTERFACE" ]; then
 fi
 
 # 之前这里只在 device 变化时才 commit，其余 uci set 会丢失
-FW_CHANGED=$(/usr/bin/f50-firewall-zone.sh) || exit 1
-if [ "$CHANGED" = "1" ] || [ "$FW_CHANGED" = "changed" ]; then
-    [ "$CHANGED" = "1" ] && uci commit network
+if [ "$CHANGED" = "1" ]; then
+    uci commit network
 
     # 模组抖动时（例如供电不足导致每 10 秒重枚举一次）不要每次都 reload 网络，
     # 否则 Wi-Fi 和 LAN 会被跟着带崩。60 秒内最多重载一次。
@@ -637,7 +448,7 @@ cat << 'EOF' > package/base-files/files/usr/bin/f50-watchdog.sh
 # F50 蜂窝链路看门狗（cron 每 3 分钟）
 #   1) 接口不存在 -> 直接退出（modem 被拔掉时不要误重连/误重启）
 #   2) 接口存在但 operstate 不是 up -> 重连
-#   3) 连续探测失败 -> 第 1 次重连接口，第 2 次软复位 USB，REBOOT_AFTER 次后重启（默认关闭）
+#   3) 连续探测失败 -> 先重连；REBOOT_AFTER 次后重启（默认关闭，见下方说明）
 #
 # 注意：ifup 对已经 up 的接口是空操作，救不回卡死的 DHCP 租约，
 # 所以这里一律先 ifdown 再 ifup。
@@ -651,23 +462,7 @@ DEV=$(uci -q get network.f50.device)
 [ -d "/sys/class/net/$DEV" ] || exit 0
 
 STATE=/tmp/.f50_watchdog_fails
-# 多个探测目标，任一通即视为链路正常，避免单个目标被限流/屏蔽导致误判
-TARGETS="${F50_PING_TARGET:-223.5.5.5 119.29.29.29}"
-
-# 软复位 USB 设备（等价于拔插一次），比 ifdown/ifup 更能救回"枚举正常但模组卡死"的情况，
-# 又不用整机重启。路径来自 net 设备的 sysfs 链接，不写死端口号。
-usb_reset() {
-    local U
-    U=$(dirname "$(readlink -f "/sys/class/net/$DEV/device" 2>/dev/null)")
-    if [ -w "$U/authorized" ]; then
-        logger -t f50-watchdog "软复位 USB 设备 $U"
-        echo 0 > "$U/authorized"
-        sleep 2
-        echo 1 > "$U/authorized"
-        return 0
-    fi
-    return 1
-}
+TARGET="${F50_PING_TARGET:-223.5.5.5}"
 
 RECONNECT_STAMP=/tmp/.f50_last_reconnect
 reconnect() {
@@ -692,25 +487,18 @@ if [ "$OPER" != "up" ]; then
     exit 0
 fi
 
-for T in $TARGETS; do
-    if ping -c 3 -W 2 -I "$DEV" "$T" >/dev/null 2>&1; then
-        rm -f "$STATE"
-        exit 0
-    fi
-done
+if ping -c 3 -W 2 -I "$DEV" "$TARGET" >/dev/null 2>&1; then
+    rm -f "$STATE"
+    exit 0
+fi
 
 FAILS=$(cat "$STATE" 2>/dev/null || echo 0)
 case "$FAILS" in ''|*[!0-9]*) FAILS=0 ;; esac
 FAILS=$((FAILS + 1))
 echo "$FAILS" > "$STATE"
-logger -t f50-watchdog "$DEV 探测 $TARGETS 全部失败（连续 ${FAILS} 次）"
+logger -t f50-watchdog "$DEV 探测 $TARGET 失败（连续 ${FAILS} 次）"
 
-# 第 1 次失败：重连接口；第 2 次仍失败：软复位 USB；之后每次继续重连，REBOOT_AFTER 次后重启
-if [ "$FAILS" -eq 2 ]; then
-    usb_reset
-else
-    reconnect
-fi
+reconnect
 
 if [ "${REBOOT_AFTER:-0}" -gt 0 ] 2>/dev/null && [ "$FAILS" -ge "$REBOOT_AFTER" ]; then
     logger -t f50-watchdog "连续 ${FAILS} 次重连无效，重启设备"
@@ -764,12 +552,8 @@ fetch_data "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/down
 fetch_data "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geoip.dat" "$OC_ROOT/GeoIP.dat" "GeoIP.dat"
 
 mkdir -p package/base-files/files/etc
-# /etc/f50-watchdog.conf：看门狗的 REBOOT_AFTER 设置，不列在这里升级后会丢
-# /etc/.custom-init-done：首启初始化只做一次的标记，丢了会在每次升级后重置 Wi-Fi/NTP 等设置
-for keep in /etc/openclash/ /etc/f50-watchdog.conf /etc/.custom-init-done; do
-    grep -qxF "$keep" package/base-files/files/etc/sysupgrade.conf 2>/dev/null \
-        || echo "$keep" >> package/base-files/files/etc/sysupgrade.conf
-done
+grep -qxF '/etc/openclash/' package/base-files/files/etc/sysupgrade.conf 2>/dev/null \
+    || echo '/etc/openclash/' >> package/base-files/files/etc/sysupgrade.conf
 
 # ==============================================================================
 # 7. 统一开机初始化脚本（中文/主题/BBR/F50/Wi-Fi/OpenClash/看门狗）
@@ -778,14 +562,6 @@ mkdir -p package/base-files/files/etc/uci-defaults
 cat << 'EOF' > package/base-files/files/etc/uci-defaults/99-custom-init
 #!/bin/sh
 # 首次启动初始化（执行成功后 OpenWrt 会自动删除本文件）
-#
-# 注意：uci-defaults 里的脚本在"每次升级后的首次启动"都会再跑一遍（脚本在固件里，
-# 保留配置升级只恢复配置文件，不恢复"已执行"状态）。所以下面会改动用户设置的部分
-# （SSID/信道/NTP/MTU/防火墙…）必须只在真正的首次初始化时执行，否则每次 OTA
-# 都会把用户在 LuCI 里改过的设置还原。标记文件由 sysupgrade.conf 保留。
-MARK=/etc/.custom-init-done
-
-if [ ! -f "$MARK" ]; then
 
 # 1. 简体中文 + Aurora 主题
 #    语言代码必须和固件里实际存在的 base.zh*.lmo 对上，写错就是整片英文。
@@ -849,8 +625,13 @@ done
 uci set network.f50.device="$USB_DEV"
 uci commit network
 
-# 4. 把 f50 挂到 wan 防火墙区域；失败时不要标记首启完成，留待下次修复。
-/usr/bin/f50-firewall-zone.sh >/dev/null || exit 1
+# 4. 把 f50 挂到 wan 防火墙区域（不再硬编码 0..10 的索引上限）
+ZONE_IDX=$(uci show firewall 2>/dev/null | sed -n "s/^firewall\.@zone\[\([0-9]\+\)\]\.name=['\"]\?wan['\"]\?$/\1/p" | head -n 1)
+if [ -n "$ZONE_IDX" ]; then
+    uci -q del_list "firewall.@zone[$ZONE_IDX].network=f50" 2>/dev/null
+    uci add_list "firewall.@zone[$ZONE_IDX].network=f50"
+fi
+uci commit firewall
 
 # 5. 时区与 NTP
 uci set system.@system[0].zonename='Asia/Shanghai'
@@ -861,23 +642,17 @@ uci add_list system.ntp.server='time1.cloud.tencent.com'
 uci commit system
 
 # 6. Wi-Fi 6
-#    国家码按实际所在地设置：这里用 CN（5150–5350 室内 200mW、2400–2483.5）。
-#    5G 固定 ch36 + HE80，占用 36–48，全部落在 CN 的非 DFS 频段里。
-WIFI_COUNTRY='CN'
 for r in radio0 radio1; do
     [ -n "$(uci -q get wireless.$r)" ] || continue
     BAND=$(uci -q get wireless.$r.band)
-    uci set wireless.$r.country="$WIFI_COUNTRY"
+    uci set wireless.$r.country='US'
     uci set wireless.$r.cell_density='0'
     uci set wireless.$r.mu_beamformer='1'
     uci set wireless.$r.disabled='0'
     uci set wireless.default_$r.disabled='0'
     if [ "$BAND" = "5g" ]; then
         uci set wireless.$r.channel='36'
-        # HE160 在 ch36 会占用 36-64，其中 52-64 是 DFS 信道：启动要做约 60 秒雷达检测，
-        # 运行中遇到雷达信号还会被强制换信道断流。HE80(36-48) 全是非 DFS，稳定得多，
-        # 而 F50 上行最高只有 300~500Mbps，用不满 160MHz。
-        uci set wireless.$r.htmode='HE80'
+        uci set wireless.$r.htmode='HE160'
         uci set wireless.default_$r.ssid='Cudy-TR3000-5G'
         uci set wireless.default_$r.disassoc_low_ack='0'
     elif [ "$BAND" = "2g" ]; then
@@ -895,21 +670,6 @@ if [ -f "/etc/config/openclash" ] && [ -x /etc/openclash/core/clash_meta ]; then
     uci set openclash.config.enable_meta_core='1'
     uci set openclash.config.core_version='linux-arm64'
     uci commit openclash
-fi
-
-touch "$MARK"
-fi   # ---- 以上只在首次初始化执行 ----
-
-# 以下每次升级后都执行（幂等，不覆盖已有用户设置）
-# 保留配置升级时 /etc/config/system 可能来自旧固件，没有参考源码的 modem_power 开关。
-# 仅在完全缺失时补建并立即开启；用户已经设置过开关则尊重其选择。
-if [ -d /sys/class/gpio/modem_power ] && [ -z "$(uci -q get system.modem_power)" ]; then
-    uci set system.modem_power='gpio_switch'
-    uci set system.modem_power.name='Modem power'
-    uci set system.modem_power.gpio_pin='modem_power'
-    uci set system.modem_power.value='1'
-    uci commit system
-    /etc/init.d/gpio_switch restart
 fi
 chmod 0755 /etc/openclash/core/clash* 2>/dev/null || true
 
@@ -935,16 +695,12 @@ chmod +x package/base-files/files/etc/uci-defaults/99-custom-init
 [ -f package/luci-app-openclash/Makefile ]     || die "luci-app-openclash 未就绪"
 [ -x package/base-files/files/usr/bin/auto-update-firmware.sh ]        || die "OTA 脚本未生成"
 [ -x package/base-files/files/usr/bin/f50-watchdog.sh ]                || die "看门狗脚本未生成"
-[ -x package/base-files/files/usr/bin/f50-firewall-zone.sh ]            || die "F50 防火墙配置脚本未生成"
 [ -f package/base-files/files/etc/uci-defaults/99-custom-init ]        || die "首启脚本未生成"
 [ -f package/base-files/files/www/luci-static/resources/view/autoupdate/index.js ] || die "OTA 视图未生成"
 [ -f package/base-files/files/usr/share/luci/menu.d/luci-app-autoupdate.json ]     || die "OTA 菜单未生成"
 [ -x package/base-files/files/etc/init.d/usb-nosuspend ]  || die "USB 禁止休眠脚本未生成"
 [ -e package/base-files/files/etc/rc.d/S20usb-nosuspend ] || die "USB 禁止休眠未挂到 rc.d"
 [ -f package/base-files/files/usr/share/rpcd/acl.d/luci-app-autoupdate.json ]      || die "OTA ACL 未生成"
-[ -f package/base-files/files/etc/sysctl.d/99-bbr.conf ]                           || die "BBR sysctl 配置未生成"
-[ -x package/base-files/files/etc/init.d/bbr ]                                     || die "BBR 启动脚本未生成"
-[ -e package/base-files/files/etc/rc.d/S21bbr ]                                    || die "BBR 未挂到 rc.d"
 
 if [ "$F50_ACCEL" = "0" ]; then
     [ -f package/base-files/files/usr/share/nftables.d/table-post/99-f50-ttl.nft ] || die "TTL 规则未生成"
